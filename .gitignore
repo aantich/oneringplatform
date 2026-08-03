@@ -1,0 +1,61 @@
+# Dependencies and package-manager caches
+node_modules/
+.npm/
+.npm-cache/
+.pnpm-store/
+.yarn/
+*.tgz
+
+# Build output and compiler caches
+dist/
+build/
+out/
+.vite/
+.vitest/
+*.tsbuildinfo
+apps/web/vite.config.js
+apps/web/vite.config.js.map
+apps/web/vite.config.d.ts
+apps/web/vite.config.d.ts.map
+
+# Tests and coverage
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+blob-report/
+
+# Local runtime state
+.data/
+logs/
+*.log
+*.pid
+*.pid.lock
+tmp/
+temp/
+
+# Environment files, credentials, and local certificates
+.env
+.env.*
+!.env.example
+!.env.*.example
+.envrc
+.envrc.*
+!.envrc.example
+.direnv/
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.jks
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
