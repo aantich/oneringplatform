@@ -14,6 +14,7 @@ export class StoreService implements OnModuleInit {
     if (process.env.NODE_ENV === 'test') return;
     try {
       this.state = JSON.parse(await readFile(this.dataFile, 'utf8')) as PlatformState;
+      this.state.agents = this.state.agents.map((agent) => ({ ...agent, effort: agent.effort ?? 'medium' }));
     } catch {
       await this.persist();
     }

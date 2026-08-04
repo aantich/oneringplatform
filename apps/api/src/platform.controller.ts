@@ -1,7 +1,8 @@
-import { Body, Controller, Get, Inject, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Inject, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import type { Request } from 'express';
 import type { BuilderAgent, SpecArtifact } from './domain.js';
 import { PlatformService } from './platform.service.js';
-import { ControlPlaneAuthGuard, PublicControlPlane } from './control-plane-auth.guard.js';
+import { ControlPlaneAuthGuard, PublicControlPlane, RequirePermission, type ControlPlanePrincipal } from './control-plane-auth.guard.js';
 
 @Controller()
 @UseGuards(ControlPlaneAuthGuard)
@@ -15,26 +16,31 @@ export class PlatformController {
   }
 
   @Get('bootstrap')
-  bootstrap() {
-    return this.platform.bootstrap();
+  @RequirePermission('organization.read')
+  bootstrap(@Req() req: Request & { controlPrincipal?: ControlPlanePrincipal }) {
+    return this.platform.bootstrap(req.controlPrincipal!.permissions.includes('platform.builder_system.manage'));
   }
 
   @Get('projects/:projectId')
+  @RequirePermission('app.read')
   project(@Param('projectId') projectId: string) {
     return this.platform.project(projectId);
   }
 
   @Post('projects/:projectId/interview')
+  @RequirePermission('app.write')
   interview(@Param('projectId') projectId: string, @Body() body: { content?: string }) {
     return this.platform.interview(projectId, body.content ?? '');
   }
 
   @Post('projects/:projectId/approve-prd')
+  @RequirePermission('app.write')
   approvePrd(@Param('projectId') projectId: string) {
     return this.platform.approvePrd(projectId);
   }
 
   @Patch('projects/:projectId/artifacts/:artifactId')
+  @RequirePermission('app.write')
   updateArtifact(
     @Param('projectId') projectId: string,
     @Param('artifactId') artifactId: string,
@@ -44,16 +50,19 @@ export class PlatformController {
   }
 
   @Patch('builder-agents/:agentId')
+  @RequirePermission('platform.builder_system.manage')
   updateAgent(@Param('agentId') agentId: string, @Body() body: Partial<BuilderAgent>) {
     return this.platform.updateAgent(agentId, body);
   }
 
   @Post('projects/:projectId/runs')
+  @RequirePermission('release.create')
   startRun(@Param('projectId') projectId: string) {
     return this.platform.startRun(projectId);
   }
 
   @Post('releases/:releaseId/promote')
+  @RequirePermission('release.promote')
   promote(@Param('releaseId') releaseId: string) {
     return this.platform.promote(releaseId);
   }

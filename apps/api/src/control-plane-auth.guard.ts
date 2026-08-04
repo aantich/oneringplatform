@@ -1,54 +1,114 @@
-import { CanActivate, ExecutionContext, ForbiddenException, Inject, Injectable, SetMetadata, UnauthorizedException } from '@nestjs/common';
+import { CanActivate, ExecutionContext, ForbiddenException, Inject, Injectable, SetMetadata } from '@nestjs/common';
 import type { Request } from 'express';
-import { jwtVerify } from 'jose';
 import { BrowserAppRepository } from './browser-app.repository.js';
+import { ControlPlaneIdentityService } from './control-plane-identity.service.js';
 
-export type ControlPlanePrincipal = { subject: string; email?: string; organizationIds: string[]; superadmin: boolean };
-export const PublicControlPlane = () => SetMetadata('controlPlanePublic', true);
+export const CONTROL_PLANE_PUBLIC = 'controlPlanePublic';
+export const CONTROL_PLANE_PERMISSIONS = 'controlPlanePermissions';
+
+export type PlatformRole = 'platform_root' | 'platform_operator' | 'platform_security_admin' | 'platform_support' | 'platform_billing_admin';
+export type OrganizationRole = 'owner' | 'admin' | 'builder' | 'release_manager' | 'secrets_admin' | 'billing' | 'viewer';
+export type ControlPlanePermission =
+  | 'platform.builder_system.manage'
+  | 'organization.create'
+  | 'organization.read'
+  | 'organization.members.manage'
+  | 'app.read'
+  | 'app.create'
+  | 'app.write'
+  | 'app.admin'
+  | 'release.create'
+  | 'release.promote'
+  | 'secrets.manage'
+  | 'billing.read';
+
+export type ControlPlanePrincipal = {
+  subject: string;
+  email?: string;
+  activePlatformOrganizationId?: string;
+  membershipId?: string;
+  membershipVersion?: number;
+  organizationRole?: OrganizationRole;
+  platformRoles: PlatformRole[];
+  permissions: ControlPlanePermission[];
+  localDevelopment: boolean;
+};
+
+const organizationPermissions: ControlPlanePermission[] = [
+  'organization.create', 'organization.read', 'organization.members.manage',
+  'app.read', 'app.create', 'app.write', 'app.admin', 'release.create', 'release.promote', 'secrets.manage', 'billing.read',
+];
+
+const platformRootPermissions: ControlPlanePermission[] = ['platform.builder_system.manage', 'organization.create'];
+
+const organizationRolePermissions: Record<OrganizationRole, ControlPlanePermission[]> = {
+  owner: organizationPermissions,
+  admin: ['organization.create', 'organization.read', 'organization.members.manage', 'app.read', 'app.create', 'app.write', 'app.admin', 'release.create', 'release.promote', 'secrets.manage', 'billing.read'],
+  builder: ['organization.create', 'organization.read', 'app.read', 'app.create', 'app.write', 'release.create'],
+  release_manager: ['organization.create', 'organization.read', 'app.read', 'release.create', 'release.promote'],
+  secrets_admin: ['organization.create', 'organization.read', 'app.read', 'secrets.manage'],
+  billing: ['organization.create', 'organization.read', 'billing.read'],
+  viewer: ['organization.create', 'organization.read', 'app.read'],
+};
+
+export const PublicControlPlane = () => SetMetadata(CONTROL_PLANE_PUBLIC, true);
+export const RequirePermission = (...permissions: ControlPlanePermission[]) => SetMetadata(CONTROL_PLANE_PERMISSIONS, permissions);
 
 @Injectable()
 export class ControlPlaneAuthGuard implements CanActivate {
-  constructor(@Inject(BrowserAppRepository) private readonly repository: BrowserAppRepository) {}
+  constructor(
+    @Inject(BrowserAppRepository) private readonly repository: BrowserAppRepository,
+    @Inject(ControlPlaneIdentityService) private readonly identities: ControlPlaneIdentityService,
+  ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const handler = context.getHandler() as unknown as { [key: string]: unknown };
-    if (Reflect.getMetadata('controlPlanePublic', handler)) return true;
+    if (Reflect.getMetadata(CONTROL_PLANE_PUBLIC, handler)) return true;
+
     const request = context.switchToHttp().getRequest<Request & { controlPrincipal?: ControlPlanePrincipal }>();
-    const principal = await this.authenticate(request);
+    const identity = await this.identities.authenticate(request);
+    const platformRoles = await this.repository.platformRoles(identity.subject);
+    const membership = identity.activePlatformOrganizationId
+      ? await this.repository.platformMembership(identity.subject, identity.activePlatformOrganizationId)
+      : undefined;
+    const permissions = new Set<ControlPlanePermission>(['organization.create']);
+    if (platformRoles.includes('platform_root')) platformRootPermissions.forEach((permission) => permissions.add(permission));
+    if (membership?.status === 'active') organizationRolePermissions[membership.role].forEach((permission) => permissions.add(permission));
+
+    const principal: ControlPlanePrincipal = {
+      subject: identity.subject,
+      ...(identity.email ? { email: identity.email } : {}),
+      ...(identity.activePlatformOrganizationId ? { activePlatformOrganizationId: identity.activePlatformOrganizationId } : {}),
+      ...(membership?.status === 'active' ? {
+        membershipId: membership.id,
+        membershipVersion: membership.version,
+        organizationRole: membership.role,
+      } : {}),
+      platformRoles,
+      permissions: [...permissions],
+      localDevelopment: identity.localDevelopment,
+    };
     request.controlPrincipal = principal;
+
+    const required = Reflect.getMetadata(CONTROL_PLANE_PERMISSIONS, handler) as ControlPlanePermission[] | undefined;
+    if (!required?.length) throw new ForbiddenException('Authorization policy is missing');
+    if (!required.every((permission) => permissions.has(permission))) throw new ForbiddenException('Required permission is missing');
+
+    const rawOrganizationId = request.params?.organizationId;
+    const organizationId = Array.isArray(rawOrganizationId) ? rawOrganizationId[0] : rawOrganizationId;
+    if (organizationId && organizationId !== principal.activePlatformOrganizationId) {
+      throw new ForbiddenException('The requested organization is not the active organization');
+    }
+
     const rawAppId = request.params?.appId;
     const appId = Array.isArray(rawAppId) ? rawAppId[0] : rawAppId;
-    if (appId && !principal.superadmin) {
+    if (appId) {
       const app = await this.repository.findApp(appId);
-      if (!app || !principal.organizationIds.includes(app.ownerOrganizationId)) throw new ForbiddenException('Application ownership required');
+      if (!app || !principal.activePlatformOrganizationId || app.platformOrganizationId !== principal.activePlatformOrganizationId) {
+        throw new ForbiddenException('Application ownership required in the active organization');
+      }
     }
     return true;
   }
 
-  private async authenticate(request: Request): Promise<ControlPlanePrincipal> {
-    const secret = process.env.CONTROL_PLANE_JWT_SECRET;
-    if (!secret && process.env.NODE_ENV !== 'production') {
-      const address = request.ip || request.socket.remoteAddress || '';
-      if (address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1') {
-        return { subject: 'local-superadmin', organizationIds: ['everworker-labs'], superadmin: true };
-      }
-    }
-    if (!secret) throw new UnauthorizedException('Control-plane authentication is not configured');
-    const authorization = request.get('authorization');
-    if (!authorization?.startsWith('Bearer ')) throw new UnauthorizedException('Bearer token required');
-    try {
-      const result = await jwtVerify(authorization.slice(7), new TextEncoder().encode(secret), {
-        issuer: 'onering-control-plane', audience: 'onering-platform',
-      });
-      const organizations = Array.isArray(result.payload.organizationIds)
-        ? result.payload.organizationIds.filter((value): value is string => typeof value === 'string') : [];
-      return {
-        subject: result.payload.sub ?? 'unknown',
-        ...(typeof result.payload.email === 'string' ? { email: result.payload.email.toLowerCase() } : {}),
-        organizationIds: organizations, superadmin: result.payload.superadmin === true,
-      };
-    } catch {
-      throw new UnauthorizedException('Invalid control-plane token');
-    }
-  }
 }

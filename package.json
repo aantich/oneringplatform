@@ -2,7 +2,9 @@
   "name": "onering-platform",
   "version": "0.1.0",
   "private": true,
-  "workspaces": ["apps/*"],
+  "workspaces": [
+    "apps/*"
+  ],
   "scripts": {
     "dev": "./scripts/run-dev.sh",
     "dev:direct": "concurrently -k -n api,web -c blue,magenta \"npm run dev -w @onering/platform-api\" \"npm run dev -w @onering/platform-web\"",
@@ -10,11 +12,16 @@
     "build": "npm run build -w @onering/platform-web && npm run build -w @onering/platform-api",
     "typecheck": "npm run typecheck -w @onering/platform-api && npm run typecheck -w @onering/platform-web",
     "test": "npm run test -w @onering/platform-api && npm run test -w @onering/platform-web",
+    "test:ai:live": "npm run test:ai:live -w @onering/platform-api",
+    "test:e2e": "./scripts/run-e2e.sh",
     "check": "npm run typecheck && npm run test && npm run build",
     "start": "npm run start -w @onering/platform-api"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "concurrently": "^9.2.1"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  }
 }

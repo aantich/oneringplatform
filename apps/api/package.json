@@ -9,10 +9,11 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "../../scripts/run-api-tests.sh"
+    "test": "../../scripts/run-api-tests.sh",
+    "test:ai:live": "RUN_LIVE_AI_TESTS=1 vitest run src/ai.live.test.ts"
   },
   "dependencies": {
-    "@everworker/oneringai": "file:../../../oneringai",
+    "@everworker/oneringai": "0.11.0",
     "@nestjs/common": "^11.1.6",
     "@nestjs/core": "^11.1.6",
     "@nestjs/platform-express": "^11.1.6",
@@ -24,6 +25,7 @@
     "esbuild": "^0.25.11",
     "jose": "^6.1.0",
     "mongodb": "^6.20.0",
+    "react-router-dom": "7.18.2",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
     "zod": "^4.1.11"

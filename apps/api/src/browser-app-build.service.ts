@@ -5,14 +5,19 @@ import type { AppBuild, BrowserRelease, ReleaseCheck, RouteDefinition } from './
 import { BrowserAppRepository } from './browser-app.repository.js';
 import { BrowserAppThemeCompilerService } from './browser-app-theme-compiler.service.js';
 
-export const browserRuntimeContractVersion = 2;
+export const browserRuntimeContractVersion = 3;
+export const browserGeneratorVersion = 'browser-graph-v2';
 
 const runtimeModule = `const root = document.getElementById('root');
 export const basePath = root?.dataset.base || '';
+const previewHeaders = root?.dataset.previewRelease && root?.dataset.previewToken ? {
+  'x-onering-preview-release': root.dataset.previewRelease,
+  'x-onering-preview-token': root.dataset.previewToken,
+} : {};
 let cached;
 export async function bootstrap(force = false) {
   if (!cached || force) {
-    const response = await fetch(basePath + '/_or/bootstrap', { credentials: 'include' });
+    const response = await fetch(basePath + '/_or/bootstrap', { credentials: 'include', headers: previewHeaders });
     if (!response.ok) throw new Error('Unable to initialize application session');
     cached = await response.json();
   }
@@ -23,7 +28,7 @@ export async function api(path, init = {}) {
   const response = await fetch(basePath + '/_or' + path, {
     ...init,
     credentials: 'include',
-    headers: { 'content-type': 'application/json', 'x-csrf-token': context.csrfToken, ...(init.method === 'POST' ? { 'idempotency-key': crypto.randomUUID() } : {}), ...(init.headers || {}) },
+    headers: { 'content-type': 'application/json', 'x-csrf-token': context.csrfToken, ...previewHeaders, ...(init.method === 'POST' ? { 'idempotency-key': crypto.randomUUID() } : {}), ...(init.headers || {}) },
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.message || 'Request failed (' + response.status + ')');
@@ -33,7 +38,7 @@ export async function setDemoRole(role) {
   const context = await bootstrap();
   const response = await fetch(basePath + '/_or/auth/demo-login', {
     method: 'POST', credentials: 'include',
-    headers: { 'content-type': 'application/json', 'x-csrf-token': context.csrfToken },
+    headers: { 'content-type': 'application/json', 'x-csrf-token': context.csrfToken, ...previewHeaders },
     body: JSON.stringify({ role }),
   });
   if (!response.ok) throw new Error('Unable to change demo role');
@@ -45,7 +50,7 @@ export async function exchangeIdentity(token, tenantId) {
   const context = await bootstrap();
   const response = await fetch(basePath + '/_or/auth/exchange', {
     method: 'POST', credentials: 'include',
-    headers: { 'content-type': 'application/json', 'x-csrf-token': context.csrfToken },
+    headers: { 'content-type': 'application/json', 'x-csrf-token': context.csrfToken, ...previewHeaders },
     body: JSON.stringify({ token, tenantId }),
   });
   const body = await response.json().catch(() => ({}));
@@ -58,7 +63,7 @@ export async function switchOrganization(tenantId) {
   const context = await bootstrap();
   const response = await fetch(basePath + '/_or/auth/switch-organization', {
     method: 'POST', credentials: 'include',
-    headers: { 'content-type': 'application/json', 'x-csrf-token': context.csrfToken },
+    headers: { 'content-type': 'application/json', 'x-csrf-token': context.csrfToken, ...previewHeaders },
     body: JSON.stringify({ tenantId }),
   });
   const body = await response.json().catch(() => ({}));
@@ -67,6 +72,38 @@ export async function switchOrganization(tenantId) {
   window.dispatchEvent(new CustomEvent('onering:session', { detail: cached }));
   window.location.reload();
   return cached;
+}
+export async function runAgent(agentId, goal, options = {}) {
+  if (typeof agentId !== 'string' || typeof goal !== 'string' || goal.trim().length < 3) throw new Error('Agent and goal are required');
+  const history = Array.isArray(options.history) ? [...options.history] : [];
+  const maximum = Number.isInteger(options.maximumIterations) ? Math.min(12, Math.max(1, options.maximumIterations)) : 8;
+  for (let iteration = 1; iteration <= maximum; iteration += 1) {
+    const turn = await api('/agents/' + encodeURIComponent(agentId) + '/turn', {
+      method: 'POST', body: JSON.stringify({ goal: goal.trim(), iteration, history }),
+    });
+    options.onEvent?.({ type: 'turn', iteration, turn });
+    if (turn.type === 'final') return { output: turn.output, iterations: iteration, history };
+    if (turn.type === 'approval') {
+      if (typeof options.onApproval !== 'function') throw new Error(turn.message || 'This agent action requires approval');
+      const approved = await options.onApproval(turn.message);
+      if (!approved) throw new Error('Agent action was not approved');
+      history.push({ role: 'assistant', content: 'Human approval granted: ' + turn.message });
+    } else if (turn.type === 'tool') {
+      const separator = String(turn.toolId).indexOf(':');
+      if (separator < 1) throw new Error('Agent requested an invalid tool');
+      const connectorId = turn.toolId.slice(0, separator);
+      const action = turn.toolId.slice(separator + 1);
+      history.push({ role: 'assistant', content: JSON.stringify({ toolId: turn.toolId, input: turn.input }) });
+      const result = await api('/connectors/' + encodeURIComponent(connectorId) + '/actions/' + encodeURIComponent(action), {
+        method: 'POST', body: JSON.stringify(turn.input || {}),
+      });
+      history.push({ role: 'tool', content: JSON.stringify({ toolId: turn.toolId, result }) });
+      options.onEvent?.({ type: 'tool', iteration, toolId: turn.toolId, result });
+    } else throw new Error('Agent returned an unknown turn type');
+    await options.onCheckpoint?.({ agentId, goal, iteration, history: [...history] });
+    if (turn.maximumIterations && iteration >= turn.maximumIterations) break;
+  }
+  throw new Error('Agent reached its iteration limit without a final response');
 }`;
 
 @Injectable()
@@ -82,6 +119,7 @@ export class BrowserAppBuildService implements OnApplicationBootstrap {
   async onApplicationBootstrap(): Promise<void> {
     const apps = await this.repository.listApps();
     for (const app of apps) {
+      await this.repository.expireIncompatiblePreviews(app.id, browserRuntimeContractVersion, browserGeneratorVersion);
       const active = await this.repository.activeRelease(app.id);
       if (!active || active.release.tenancyRevision !== app.tenancyRevision || active.release.runtimeVersion !== browserRuntimeContractVersion) {
         try {
@@ -93,10 +131,10 @@ export class BrowserAppBuildService implements OnApplicationBootstrap {
     }
   }
 
-  async buildAndRelease(appId: string): Promise<{ build: AppBuild; release: BrowserRelease }> {
+  async buildAndRelease(appId: string, options: { activate?: boolean } = {}): Promise<{ build: AppBuild; release: BrowserRelease }> {
     const prior = this.buildQueues.get(appId) ?? Promise.resolve();
     let releaseQueue!: Promise<{ build: AppBuild; release: BrowserRelease }>;
-    releaseQueue = prior.catch(() => undefined).then(() => this.executeBuildAndRelease(appId));
+    releaseQueue = prior.catch(() => undefined).then(() => this.executeBuildAndRelease(appId, options.activate ?? true));
     const marker = releaseQueue.then(() => undefined, () => undefined);
     this.buildQueues.set(appId, marker);
     return releaseQueue.finally(() => {
@@ -104,7 +142,7 @@ export class BrowserAppBuildService implements OnApplicationBootstrap {
     });
   }
 
-  private async executeBuildAndRelease(appId: string): Promise<{ build: AppBuild; release: BrowserRelease }> {
+  private async executeBuildAndRelease(appId: string, activate: boolean): Promise<{ build: AppBuild; release: BrowserRelease }> {
     const detail = await this.repository.detail(appId);
     if (!detail) throw new Error('Browser app not found');
     const theme = detail.themes.find((candidate) => candidate.revision === detail.app.themeRevision);
@@ -114,10 +152,12 @@ export class BrowserAppBuildService implements OnApplicationBootstrap {
     const build: AppBuild = {
       id: buildId,
       appId: detail.app.id,
+      specRevision: detail.app.specRevision,
       sourceRevision: detail.app.sourceRevision,
       themeRevision: theme.revision,
       tenancyRevision: detail.tenancy.revision,
       runtimeVersion: browserRuntimeContractVersion,
+      generationProfile: detail.app.generationProfile,
       status: 'building',
       css: this.themeCompiler.compile(this.repository.runtimeStyles(), theme),
       themeName: theme.name,
@@ -126,12 +166,18 @@ export class BrowserAppBuildService implements OnApplicationBootstrap {
       routeCount: detail.routes.length,
       tests: 0,
       checks: [],
+      acceptance: { total: detail.specification.structure.acceptanceCriteria.length, covered: 0, requirementIds: [] },
       createdAt,
     };
     await this.repository.writeBuild(build);
 
     try {
       await this.check(build, 'graph', 'Module and route graph', () => this.validateGraph(detail.modules.map((item) => item.id), detail.routes));
+      await this.check(build, 'specification', 'Structured specification contract', () => this.validateSpecification(detail));
+      await this.check(build, 'traceability', 'Requirement and acceptance coverage', () => {
+        build.acceptance = this.validateTraceability(detail);
+      });
+      await this.check(build, 'acceptance', 'Executable acceptance contracts', () => this.validateAcceptance(detail));
       await this.check(build, 'contracts', 'Schema and policy contracts', () => this.validateContracts(detail));
       await this.check(build, 'imports', 'Package allowlist', () => this.validateImports(detail.modules.map((item) => item.source)));
       await this.check(build, 'source-security', 'Browser source security scan', () => this.validateSourceSecurity(detail.modules.map((item) => item.source)));
@@ -190,14 +236,16 @@ export class BrowserAppBuildService implements OnApplicationBootstrap {
 
       const artifactDigest = `sha256:${digest}`;
       const releaseKey = createHash('sha256').update(JSON.stringify({
-        appId: detail.app.id, source: detail.app.sourceRevision, schema: detail.app.schemaRevision,
+        appId: detail.app.id, spec: detail.app.specRevision, source: detail.app.sourceRevision, schema: detail.app.schemaRevision,
         policy: detail.app.policyRevision, connector: detail.app.connectorRevision,
-        theme: theme.revision, tenancy: detail.tenancy.revision, runtime: browserRuntimeContractVersion, artifactDigest,
+        theme: theme.revision, tenancy: detail.tenancy.revision, runtime: browserRuntimeContractVersion,
+        generationAgents: detail.app.generationProfile?.agents, artifactDigest,
       })).digest('hex');
       const release: BrowserRelease = {
         id: randomUUID(),
         appId: detail.app.id,
-        version: `0.${detail.app.sourceRevision}.${theme.revision}.${detail.tenancy.revision}.${browserRuntimeContractVersion}`,
+        specRevision: detail.app.specRevision,
+        version: `0.${detail.app.specRevision}.${detail.app.sourceRevision}.${theme.revision}.${detail.tenancy.revision}.${browserRuntimeContractVersion}`,
         buildId: build.id,
         sourceRevision: detail.app.sourceRevision,
         schemaRevision: detail.app.schemaRevision,
@@ -208,12 +256,16 @@ export class BrowserAppBuildService implements OnApplicationBootstrap {
         runtimeVersion: browserRuntimeContractVersion,
         artifactDigest,
         releaseKey,
-        status: 'active',
+        environment: activate ? 'production' : 'preview',
+        status: activate ? 'active' : 'preview',
+        ...(activate ? {} : { previewToken: randomUUID() }),
+        generatorVersion: browserGeneratorVersion,
+        generationProfile: detail.app.generationProfile,
         createdAt: completedAt,
       };
-      const activated = await this.repository.activateRelease(release);
-      this.logger.log(`Published browser app ${appId} release ${activated.version}`);
-      return { build, release: activated };
+      const published = activate ? await this.repository.activateRelease(release) : await this.repository.publishPreview(release);
+      this.logger.log(`${activate ? 'Published' : 'Prepared preview for'} browser app ${appId} release ${published.version}`);
+      return { build, release: published };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       Object.assign(build, { status: 'failed', tests: build.checks.filter((check) => check.status === 'passed').length, error: message, completedAt: new Date().toISOString() });
@@ -248,6 +300,89 @@ export class BrowserAppBuildService implements OnApplicationBootstrap {
       }
     }
     for (const policy of detail.policies) if (!detail.schemas.some((schema) => schema.entity === policy.entity)) throw new Error(`Policy ${policy.id} references a missing entity`);
+    const connectorTools = new Set(detail.connectors.map((connector) => `${connector.id}:${connector.action}`));
+    for (const agent of detail.agents) {
+      for (const toolId of agent.toolIds) if (!connectorTools.has(toolId)) throw new Error(`Browser agent ${agent.id} references missing connector tool ${toolId}`);
+      if (agent.maximumIterations < 1 || agent.maximumIterations > 12) throw new Error(`Browser agent ${agent.id} has an invalid iteration budget`);
+    }
+  }
+
+  private validateSpecification(detail: NonNullable<Awaited<ReturnType<BrowserAppRepository['detail']>>>): void {
+    const specification = detail.specification.structure;
+    if (detail.app.generatedFromSpecRevision !== detail.app.specRevision) throw new Error('Source graph was not generated from the current specification revision');
+    if (!specification.purpose.trim()) throw new Error('The structured specification needs an application purpose');
+    if (!specification.pages.length) throw new Error('The structured specification needs at least one page');
+    const paths = new Set(detail.routes.map((route) => route.path));
+    const specifiedPaths = new Set(specification.pages.map((page) => page.path));
+    const specifiedPageIds = new Set(specification.pages.map((page) => page.id));
+    for (const page of specification.pages) {
+      if (!paths.has(page.path)) throw new Error(`Specified page ${page.id} has no route at ${page.path}`);
+      if (!detail.routes.some((route) => route.specPageId === page.id && route.path === page.path)) throw new Error(`Specified page ${page.id} is not linked to its route`);
+      if (!page.states.includes('ready')) throw new Error(`Specified page ${page.id} must define its ready state`);
+    }
+    for (const route of detail.routes) if (!specifiedPaths.has(route.path) || !specifiedPageIds.has(route.specPageId)) throw new Error(`Route ${route.id} is not declared by the structured specification`);
+    const entityIds = new Set(detail.schemas.map((schema) => schema.entity));
+    for (const entity of specification.entities) if (!entityIds.has(entity.id)) throw new Error(`Specified entity ${entity.id} has no data schema`);
+    const specifiedEntityIds = new Set(specification.entities.map((entity) => entity.id));
+    for (const entity of detail.schemas) if (!specifiedEntityIds.has(entity.entity)) throw new Error(`Data schema ${entity.entity} is not declared by the structured specification`);
+    const agentIds = new Set(detail.agents.map((agent) => agent.id));
+    for (const agent of specification.agents) if (!agentIds.has(agent.id)) throw new Error(`Specified browser agent ${agent.id} has no executable agent definition`);
+    const specifiedAgentIds = new Set(specification.agents.map((agent) => agent.id));
+    for (const agent of detail.agents) if (!specifiedAgentIds.has(agent.id)) throw new Error(`Browser agent ${agent.id} is not declared by the structured specification`);
+    const criterionIds = new Set(specification.acceptanceCriteria.map((criterion) => criterion.id));
+    for (const page of specification.pages) for (const id of page.acceptanceCriterionIds) {
+      if (!criterionIds.has(id)) throw new Error(`Page ${page.id} references unknown acceptance criterion ${id}`);
+    }
+    for (const workflow of specification.workflows) {
+      const pages = specification.pages.filter((page) => page.workflowIds.includes(workflow.id));
+      if (!pages.length) throw new Error(`Browser workflow ${workflow.id} is not attached to a page`);
+      if (workflow.steps.some((step) => step.type === 'agent') && !pages.some((page) => page.agentIds.length)) throw new Error(`Browser workflow ${workflow.id} has an agent step but no page agent`);
+      if (workflow.steps.some((step) => step.type === 'data_read' || step.type === 'data_write') && !pages.some((page) => page.entityIds.length)) throw new Error(`Browser workflow ${workflow.id} has a data step but no page entity`);
+    }
+  }
+
+  private validateTraceability(detail: NonNullable<Awaited<ReturnType<BrowserAppRepository['detail']>>>) {
+    const requirementIds = new Set(detail.specification.sections.map((section) => section.id));
+    const referenced = new Set([
+      ...detail.modules.flatMap((item) => item.requirementIds),
+      ...detail.routes.flatMap((item) => item.requirementIds),
+      ...detail.schemas.flatMap((item) => item.requirementIds),
+      ...detail.policies.flatMap((item) => item.requirementIds),
+      ...detail.connectors.flatMap((item) => item.requirementIds),
+      ...detail.agents.flatMap((item) => item.requirementIds),
+    ]);
+    for (const id of referenced) if (!requirementIds.has(id)) throw new Error(`Generated graph references unknown requirement ${id}`);
+    const covered = [...requirementIds].filter((id) => referenced.has(id));
+    if (covered.length !== requirementIds.size) {
+      throw new Error(`Requirements without generated coverage: ${[...requirementIds].filter((id) => !referenced.has(id)).join(', ')}`);
+    }
+    const acceptanceRequirementIds = detail.specification.structure.acceptanceCriteria.map((criterion) => criterion.requirementId);
+    for (const id of acceptanceRequirementIds) if (!requirementIds.has(id)) throw new Error(`Acceptance criterion references unknown requirement ${id}`);
+    return { total: acceptanceRequirementIds.length, covered: acceptanceRequirementIds.filter((id) => referenced.has(id)).length, requirementIds: covered };
+  }
+
+  private validateAcceptance(detail: NonNullable<Awaited<ReturnType<BrowserAppRepository['detail']>>>): void {
+    const specification = detail.specification.structure;
+    for (const criterion of specification.acceptanceCriteria) {
+      const pages = specification.pages.filter((page) => page.acceptanceCriterionIds.includes(criterion.id));
+      if (criterion.kind === 'journey' && !pages.length) throw new Error(`Journey criterion ${criterion.id} is not attached to a page`);
+      const accessibilityPages = pages.length ? pages : specification.pages;
+      if (criterion.kind === 'accessibility' && (!accessibilityPages.length || accessibilityPages.some((page) => !page.states.includes('ready')))) {
+        throw new Error(`Accessibility criterion ${criterion.id} has no ready-state page contract`);
+      }
+      if (criterion.kind === 'data') {
+        const entities = detail.schemas.filter((schema) => schema.requirementIds.includes(criterion.requirementId));
+        if (!entities.length || entities.some((schema) => !detail.policies.some((policy) => policy.entity === schema.entity && policy.requirementIds.includes(criterion.requirementId)))) {
+          throw new Error(`Data criterion ${criterion.id} is not covered by a schema and policy pair`);
+        }
+      }
+      if (criterion.kind === 'policy' && !detail.policies.some((policy) => policy.requirementIds.includes(criterion.requirementId))) {
+        throw new Error(`Policy criterion ${criterion.id} has no policy evidence`);
+      }
+      if (criterion.kind === 'agent' && !detail.agents.some((agent) => agent.requirementIds.includes(criterion.requirementId))) {
+        throw new Error(`Agent criterion ${criterion.id} has no browser-agent evidence`);
+      }
+    }
   }
 
   private validateImports(sources: string[]): void {
@@ -262,6 +397,8 @@ export class BrowserAppBuildService implements OnApplicationBootstrap {
     const forbidden = [
       [/dangerouslySetInnerHTML/, 'dangerouslySetInnerHTML'], [/\beval\s*\(/, 'eval'], [/new\s+Function\b/, 'Function constructor'],
       [/document\.cookie/, 'document.cookie'], [/\.innerHTML\s*=/, 'innerHTML assignment'], [/javascript\s*:/i, 'javascript URL'],
+      [/\bfetch\s*\(/, 'direct fetch (use app:runtime)'], [/\bXMLHttpRequest\b/, 'XMLHttpRequest'],
+      [/\bWebSocket\s*\(/, 'WebSocket'], [/\bEventSource\s*\(/, 'EventSource'], [/sendBeacon\s*\(/, 'sendBeacon'],
     ] as const;
     for (const source of sources) for (const [pattern, label] of forbidden) if (pattern.test(source)) throw new Error(`Generated source uses forbidden ${label}`);
   }

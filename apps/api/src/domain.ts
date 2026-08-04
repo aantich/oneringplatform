@@ -60,6 +60,7 @@ export interface BuilderAgent {
   stage: string;
   connector: string;
   model: string;
+  effort: 'low' | 'medium' | 'high';
   instructions: string;
   tools: string[];
   plugins: string[];

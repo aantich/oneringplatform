@@ -13,6 +13,7 @@ describe('platform API', () => {
 
   beforeAll(async () => {
     process.env.NODE_ENV = 'test';
+    process.env.LOCAL_DEV_AUTH = '1';
     process.env.MONGO_URI = process.env.MONGO_TEST_URI ?? 'mongodb://127.0.0.1:27017/oneringplatform_test';
     const module = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = module.createNestApplication();
@@ -37,6 +38,22 @@ describe('platform API', () => {
     expect(response.body.agents).toHaveLength(10);
     expect(response.body.connectors[0]).not.toHaveProperty('apiKey');
     expect(JSON.stringify(response.body)).not.toContain(process.env.OPENAI_API_KEY || 'impossible-secret');
+  });
+
+  it('exposes safe generation choices without template instructions or credentials', async () => {
+    const response = await request(app.getHttpServer()).get('/api/browser-apps/generation-options').expect(200);
+    expect(response.body.maximumAgents).toBe(3);
+    expect(response.body.agents).toContainEqual(expect.objectContaining({ id: 'implementer', name: 'Implementation lead' }));
+    expect(response.body.connectors.map((connector: { id: string }) => connector.id)).toEqual(['openai-main', 'anthropic-main']);
+    expect(response.body.connectors.every((connector: { models: unknown[] }) => connector.models.length > 0)).toBe(true);
+    expect(response.body.efforts.map((effort: { id: string }) => effort.id)).toEqual(['low', 'medium', 'high']);
+    expect(JSON.stringify(response.body)).not.toContain('instructions');
+    expect(JSON.stringify(response.body)).not.toContain(process.env.OPENAI_API_KEY || 'impossible-secret');
+
+    const invalid = structuredClone(response.body.defaultProfile);
+    invalid.agents[0].model = 'not-a-real-model';
+    await request(app.getHttpServer()).post('/api/browser-apps/pulse-tasks/generate')
+      .send({ instruction: 'This must not run.', generationProfile: invalid }).expect(400);
   });
 
   it('updates an artifact through the canonical structured spec', async () => {
@@ -243,7 +260,7 @@ describe('platform API', () => {
       .expect(201);
     expect(multi.body.detail).toMatchObject({ app: { tenancyMode: 'multi_organization', tenancyRevision: 4 }, tenancy: { mode: 'multi_organization', organizationLabel: 'Customer organization' } });
     expect(multi.body.detail.builds[0].checks.map((check: { id: string }) => check.id)).toEqual([
-      'graph', 'contracts', 'imports', 'source-security', 'tenancy', 'theme', 'compile', 'artifact',
+      'graph', 'specification', 'traceability', 'acceptance', 'contracts', 'imports', 'source-security', 'tenancy', 'theme', 'compile', 'artifact',
     ]);
     expect(multi.body.detail.builds[0].checks.every((check: { status: string }) => check.status === 'passed')).toBe(true);
 
@@ -316,6 +333,8 @@ describe('platform API', () => {
   });
 
   it('creates, validates, publishes, and pins an independent visual theme revision', async () => {
+    const original = await request(app.getHttpServer()).get('/api/browser-apps/pulse-tasks').expect(200);
+    const originalRelease = original.body.releases.find((release: { status: string }) => release.status === 'active');
     const starters = await request(app.getHttpServer()).get('/api/browser-apps/theme-starters').expect(200);
     expect(starters.body).toHaveLength(5);
     const paper = starters.body.find((starter: { id: string }) => starter.id === 'paper-studio');
@@ -344,6 +363,13 @@ describe('platform API', () => {
 
     const shell = await request(app.getHttpServer()).get('/apps/pulse-tasks/').expect(200);
     expect(shell.text).toContain('content="#f5f3ee"');
+
+    const rolledBack = await request(app.getHttpServer())
+      .post(`/api/browser-apps/pulse-tasks/themes/${original.body.app.themeRevision}/publish`)
+      .expect(201);
+    expect(rolledBack.body.detail.app.activeReleaseId).toBe(originalRelease.id);
+    expect(rolledBack.body.detail.releases.find((release: { status: string }) => release.status === 'active'))
+      .toMatchObject({ id: originalRelease.id, themeRevision: original.body.app.themeRevision });
   });
 
   it('blocks publishing a theme that fails contrast and CSS safety gates', async () => {
@@ -401,6 +427,100 @@ describe('platform API', () => {
     await request(app.getHttpServer()).get('/apps/launch-ledger/').expect(200);
   });
 
+  it('compiles specification page changes into a verified preview and promotes the exact artifact', async () => {
+    const created = await request(app.getHttpServer()).post('/api/browser-apps').send({
+      name: 'Specification Flow', description: 'Proves authoritative specification generation and preview promotion.', mode: 'team',
+    }).expect(201);
+    const appId = created.body.detail.app.id as string;
+    const originalActiveReleaseId = created.body.detail.app.activeReleaseId as string;
+    const originalSourceRevision = created.body.detail.app.sourceRevision as number;
+    const structure = structuredClone(created.body.detail.specification.structure);
+    structure.pages.push({
+      id: 'page-decisions', name: 'Decisions', path: '/decisions', purpose: 'Review traceable product decisions.', public: false,
+      roleIds: ['viewer', 'editor', 'admin'], states: ['loading', 'empty', 'error', 'forbidden', 'ready'],
+      entityIds: ['decisions'], workflowIds: [], agentIds: [], acceptanceCriterionIds: [],
+    });
+    structure.entities.push({
+      id: 'decisions', name: 'Decision', description: 'A traceable product decision.',
+      fields: [
+        { id: 'title', type: 'string', required: true, description: 'Decision title.' },
+        { id: 'approved', type: 'boolean', required: true, description: 'Whether the decision was approved.' },
+      ],
+    });
+    const revised = await request(app.getHttpServer()).patch(`/api/browser-apps/${appId}/specification`).send({
+      expectedRevision: created.body.detail.specification.revision,
+      sections: created.body.detail.specification.sections,
+      structure,
+    }).expect(200);
+    expect(revised.body.detail.app.generatedFromSpecRevision).not.toBe(revised.body.detail.app.specRevision);
+
+    process.env.AI_DISABLED = '1';
+    let generated;
+    try {
+      const options = await request(app.getHttpServer()).get('/api/browser-apps/generation-options').expect(200);
+      const generationProfile = structuredClone(options.body.defaultProfile);
+      generationProfile.agents = generationProfile.agents.map((agent: Record<string, unknown>) => ({ ...agent, effort: 'high' }));
+      generated = await request(app.getHttpServer()).post(`/api/browser-apps/${appId}/generate`)
+        .send({ instruction: 'Implement every new page in the authoritative specification.', generationProfile }).expect(201);
+    } finally {
+      delete process.env.AI_DISABLED;
+    }
+    expect(generated.body.detail.app.sourceRevision).toBeGreaterThan(originalSourceRevision);
+    expect(generated.body.detail.app.generatedFromSpecRevision).toBe(generated.body.detail.app.specRevision);
+    expect(generated.body.plan.workers).toHaveLength(2);
+    expect(generated.body.detail.app.generationProfile.agents.every((agent: { effort: string }) => agent.effort === 'high')).toBe(true);
+    expect(generated.body.detail.app.activeReleaseId).toBe(originalActiveReleaseId);
+    expect(generated.body.detail.routes).toContainEqual(expect.objectContaining({ specPageId: 'page-decisions', path: '/decisions' }));
+    expect(generated.body.detail.schemas).toContainEqual(expect.objectContaining({
+      entity: 'decisions', physicalCollection: expect.stringMatching(/^a_[a-z0-9_]+_prod_decisions$/),
+    }));
+    expect(generated.body.detail.policies).toContainEqual(expect.objectContaining({ entity: 'decisions' }));
+    const preview = generated.body.detail.releases.find((release: { status: string }) => release.status === 'preview');
+    expect(preview).toMatchObject({ environment: 'preview', specRevision: generated.body.detail.app.specRevision });
+    expect(preview.generationProfile).toEqual(generated.body.detail.app.generationProfile);
+    const generatedBuild = generated.body.detail.builds.find((build: { id: string }) => build.id === preview.buildId);
+    expect(generatedBuild.generationProfile).toEqual(generated.body.detail.app.generationProfile);
+    expect(preview.previewToken).toBeTruthy();
+    const previewShell = await request(app.getHttpServer())
+      .get(`/apps/${appId}/decisions?preview=${preview.id}&token=${preview.previewToken}`)
+      .expect(200);
+    expect(previewShell.text).toContain(`/_or/assets/${preview.buildId}/app.js`);
+    expect(previewShell.text).toContain(`data-preview-release="${preview.id}"`);
+    const previewSession = await request(app.getHttpServer()).get(`/apps/${appId}/_or/bootstrap`)
+      .set('x-onering-preview-release', preview.id).set('x-onering-preview-token', preview.previewToken).expect(200);
+    expect(previewSession.body).toMatchObject({ releaseId: preview.id, environment: 'preview', sourceRevision: preview.sourceRevision });
+    const productionSession = await request(app.getHttpServer()).get(`/apps/${appId}/_or/bootstrap`).expect(200);
+    expect(productionSession.body).toMatchObject({ releaseId: originalActiveReleaseId, environment: 'production', sourceRevision: originalSourceRevision });
+
+    const promoted = await request(app.getHttpServer()).post(`/api/browser-apps/${appId}/releases/${preview.id}/promote`).expect(201);
+    expect(promoted.body.detail.app.activeReleaseId).toBe(preview.id);
+    const active = promoted.body.detail.releases.find((release: { status: string }) => release.status === 'active');
+    expect(active).toMatchObject({ id: preview.id, artifactDigest: preview.artifactDigest, environment: 'production' });
+    expect(active).not.toHaveProperty('previewToken');
+  });
+
+  it('runs browser-owned agent turns while keeping model and tool credentials behind the gateway', async () => {
+    process.env.AI_DISABLED = '1';
+    try {
+      const browser = request.agent(app.getHttpServer());
+      const initial = await browser.get('/apps/pulse-tasks/_or/bootstrap').expect(200);
+      await browser.post('/apps/pulse-tasks/_or/agents/task-planner/turn')
+        .set('x-csrf-token', initial.body.csrfToken)
+        .send({ goal: 'Suggest the next launch task.', iteration: 1, history: [] })
+        .expect(403);
+      const viewer = await browser.post('/apps/pulse-tasks/_or/auth/demo-login')
+        .set('x-csrf-token', initial.body.csrfToken).send({ role: 'viewer' }).expect(201);
+      const turn = await browser.post('/apps/pulse-tasks/_or/agents/task-planner/turn')
+        .set('x-csrf-token', viewer.body.csrfToken)
+        .send({ goal: 'Suggest the next launch task.', iteration: 1, history: [] })
+        .expect(201);
+      expect(turn.body).toMatchObject({ type: 'final', maximumIterations: 4 });
+      expect(turn.body.output).toContain('practical next step');
+    } finally {
+      delete process.env.AI_DISABLED;
+    }
+  });
+
   it('enforces record filters for updates and projects only readable fields', async () => {
     const repository = app.get(BrowserAppRepository);
     const collection = repository.db().collection('app_policies');
@@ -444,14 +564,131 @@ describe('platform API', () => {
   it('rejects authenticated control-plane principals that do not own the app', async () => {
     const secret = 'control-plane-test-secret-at-least-32-characters';
     process.env.CONTROL_PLANE_JWT_SECRET = secret;
+    process.env.LOCAL_DEV_AUTH = '0';
     try {
-      const token = await new SignJWT({ organizationIds: ['another-owner'], superadmin: false })
+      const token = await new SignJWT({ activePlatformOrganizationId: 'another-owner' })
         .setProtectedHeader({ alg: 'HS256' }).setIssuer('onering-control-plane').setAudience('onering-platform')
         .setSubject('outsider').setIssuedAt().setExpirationTime('5m').sign(new TextEncoder().encode(secret));
       await request(app.getHttpServer()).get('/api/browser-apps/pulse-tasks').set('authorization', `Bearer ${token}`).expect(403);
       await request(app.getHttpServer()).get('/api/browser-apps').expect(401);
     } finally {
       delete process.env.CONTROL_PLANE_JWT_SECRET;
+      process.env.LOCAL_DEV_AUTH = '1';
+    }
+  });
+
+  it('isolates customer organizations and reserves builder-system APIs for platform superadmins', async () => {
+    const tenantIdentity = { 'x-local-subject': 'tenant-owner' };
+    const createdOrganization = await request(app.getHttpServer())
+      .post('/api/organizations')
+      .set(tenantIdentity)
+      .send({ name: 'Tenant Product Studio' })
+      .expect(201);
+    expect(createdOrganization.body).toMatchObject({ name: 'Tenant Product Studio', role: 'owner' });
+
+    const tenantContext = {
+      ...tenantIdentity,
+      'x-platform-organization-id': createdOrganization.body.id as string,
+    };
+    const session = await request(app.getHttpServer()).get('/api/session').set(tenantContext).expect(200);
+    expect(session.body).toMatchObject({
+      activeOrganization: { id: createdOrganization.body.id, role: 'owner' },
+      principal: { organizationRole: 'owner', localDevelopment: true },
+    });
+    expect(session.body.principal.permissions).not.toContain('platform.builder_system.manage');
+
+    const tenantBootstrap = await request(app.getHttpServer()).get('/api/bootstrap').set(tenantContext).expect(200);
+    expect(tenantBootstrap.body.agents).toEqual([]);
+    await request(app.getHttpServer()).patch('/api/builder-agents/interviewer').set(tenantContext)
+      .send({ instructions: 'Attempted tenant override' }).expect(403);
+
+    const createdApp = await request(app.getHttpServer()).post('/api/browser-apps').set(tenantContext).send({
+      name: 'Tenant Isolated App', description: 'Owned by a separate platform organization.', mode: 'multi_organization',
+      ownerOrganizationId: 'everworker-labs',
+    }).expect(201);
+    expect(createdApp.body.detail.app).toMatchObject({
+      id: 'tenant-isolated-app', platformOrganizationId: createdOrganization.body.id,
+    });
+
+    const tenantApps = await request(app.getHttpServer()).get('/api/browser-apps').set(tenantContext).expect(200);
+    expect(tenantApps.body.map((candidate: { id: string }) => candidate.id)).toContain('tenant-isolated-app');
+    expect(tenantApps.body.map((candidate: { id: string }) => candidate.id)).not.toContain('pulse-tasks');
+
+    const defaultApps = await request(app.getHttpServer()).get('/api/browser-apps').expect(200);
+    expect(defaultApps.body.map((candidate: { id: string }) => candidate.id)).not.toContain('tenant-isolated-app');
+
+    await request(app.getHttpServer()).get('/api/browser-apps/tenant-isolated-app')
+      .set({ 'x-local-subject': 'organization-outsider', 'x-platform-organization-id': createdOrganization.body.id })
+      .expect(403);
+    await request(app.getHttpServer()).get('/api/browser-apps/tenant-isolated-app')
+      .set({ 'x-local-subject': 'local-superadmin', 'x-platform-organization-id': createdOrganization.body.id })
+      .expect(403);
+  });
+
+  it('uses encrypted OneRingAI connectors as tenant login providers with optional local test credentials', async () => {
+    const organizationId = 'everworker-labs';
+    const templates = await request(app.getHttpServer())
+      .get(`/api/organizations/${organizationId}/connector-templates`)
+      .expect(200);
+    expect(templates.body.map((template: { vendorId: string }) => template.vendorId)).toEqual(['microsoft', 'google-api']);
+
+    const created = await request(app.getHttpServer())
+      .post(`/api/organizations/${organizationId}/connectors`)
+      .send({
+        name: 'google-login-test',
+        displayName: 'Google Workspace',
+        vendorId: 'google-api',
+        clientId: 'test-google-client-id',
+        clientSecret: 'test-google-client-secret',
+        isLoginProvider: true,
+        autoCreateUsers: true,
+        allowedDomains: ['example.com'],
+      })
+      .expect(201);
+    expect(created.body).toMatchObject({ vendorId: 'google-api', isLoginProvider: true, configured: true });
+    expect(JSON.stringify(created.body)).not.toContain('test-google-client-secret');
+
+    const stored = await app.get(BrowserAppRepository).db().collection('platform_connector_configs')
+      .findOne({ id: created.body.id });
+    expect(stored?.config.auth.clientSecret).toMatch(/^\$ENC\$/);
+
+    const publicConfiguration = await request(app.getHttpServer())
+      .get('/api/auth/organizations/everworker-labs')
+      .expect(200);
+    expect(publicConfiguration.body.providers).toContainEqual(expect.objectContaining({ id: created.body.id, vendorId: 'google-api' }));
+
+    const started = await request(app.getHttpServer())
+      .post('/api/auth/organizations/everworker-labs/oauth/start')
+      .send({ connectorId: created.body.id })
+      .expect(201);
+    expect(started.body.authUrl).toContain('accounts.google.com');
+    const state = new URL(started.body.authUrl).searchParams.get('state');
+    expect(state).toBeTruthy();
+    expect(await app.get(BrowserAppRepository).db().collection('platform_oauth_login_states').findOne({ state })).toBeTruthy();
+
+    await request(app.getHttpServer())
+      .patch(`/api/organizations/${organizationId}/authentication/local-password`)
+      .send({ enabled: true })
+      .expect(200);
+    await request(app.getHttpServer())
+      .post(`/api/organizations/${organizationId}/local-users`)
+      .send({ email: 'builder@example.com', displayName: 'Example Builder', password: 'testing-only-password', role: 'builder' })
+      .expect(201);
+
+    process.env.LOCAL_DEV_AUTH = '0';
+    try {
+      const browser = request.agent(app.getHttpServer());
+      const login = await browser.post('/api/auth/organizations/everworker-labs/password')
+        .send({ email: 'builder@example.com', password: 'testing-only-password' })
+        .expect(201);
+      expect(login.headers['set-cookie']?.[0]).toContain('onering_session=');
+      const session = await browser.get('/api/session').expect(200);
+      expect(session.body).toMatchObject({
+        activeOrganization: { id: organizationId },
+        principal: { email: 'builder@example.com', organizationRole: 'builder', localDevelopment: false },
+      });
+    } finally {
+      process.env.LOCAL_DEV_AUTH = '1';
     }
   });
 

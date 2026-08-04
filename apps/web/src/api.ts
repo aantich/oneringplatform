@@ -1,18 +1,48 @@
-import type { AppTenancyMode, BootstrapData, BrowserAppDetail, BrowserAppSummary, BuilderAgent, Project, Release, SpecArtifact, ThemeRevision, ThemeStarter } from './types';
+import type { AppTenancyMode, BootstrapData, BrowserAppDetail, BrowserAppSummary, BrowserGenerationAgentConfiguration, BrowserGenerationOptions, BrowserGenerationProfile, BuilderAgent, ConnectorTemplate, ControlPlaneSession, OrganizationConnectorSummary, OrganizationLoginConfiguration, PlatformOrganization, Project, Release, SpecArtifact, ThemeRevision, ThemeStarter } from './types';
+
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const activeOrganizationId = typeof window === 'undefined' ? undefined : window.localStorage.getItem('onering.activePlatformOrganizationId');
   const response = await fetch(`/api${path}`, {
     ...init,
-    headers: { 'content-type': 'application/json', ...init?.headers },
+    credentials: 'include',
+    headers: {
+      'content-type': 'application/json',
+      ...(activeOrganizationId ? { 'x-platform-organization-id': activeOrganizationId } : {}),
+      ...init?.headers,
+    },
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(body.message ?? `Request failed (${response.status})`);
+    throw new ApiError(body.message ?? `Request failed (${response.status})`, response.status);
   }
   return response.json() as Promise<T>;
 }
 
 export const api = {
+  session: () => request<ControlPlaneSession>('/session'),
+  switchOrganization: (organizationId: string) => request<{ ok: true; organizationId: string }>('/session/organization', { method: 'POST', body: JSON.stringify({ organizationId }) }),
+  publicLoginConfiguration: (slug: string) => request<OrganizationLoginConfiguration>(`/auth/organizations/${encodeURIComponent(slug)}`),
+  startOrganizationLogin: (slug: string, connectorId: string) => request<{ authUrl: string }>(`/auth/organizations/${encodeURIComponent(slug)}/oauth/start`, { method: 'POST', body: JSON.stringify({ connectorId }) }),
+  passwordLogin: (slug: string, email: string, password: string) => request<{ ok: true; organizationId: string }>(`/auth/organizations/${encodeURIComponent(slug)}/password`, { method: 'POST', body: JSON.stringify({ email, password }) }),
+  logout: () => request<{ ok: true }>('/auth/logout', { method: 'POST' }),
+  connectorTemplates: (organizationId: string) => request<ConnectorTemplate[]>(`/organizations/${organizationId}/connector-templates`),
+  organizationConnectors: (organizationId: string) => request<OrganizationConnectorSummary[]>(`/organizations/${organizationId}/connectors`),
+  createOrganizationConnector: (organizationId: string, input: {
+    name: string; displayName: string; vendorId: 'microsoft' | 'google-api'; clientId: string; clientSecret?: string;
+    tenantId?: string; scope?: string; isLoginProvider: boolean; autoCreateUsers: boolean; allowedDomains: string[];
+  }) => request<OrganizationConnectorSummary>(`/organizations/${organizationId}/connectors`, { method: 'POST', body: JSON.stringify(input) }),
+  setConnectorLoginProvider: (organizationId: string, connectorId: string, input: { enabled: boolean; autoCreateUsers: boolean; allowedDomains: string[] }) =>
+    request<OrganizationConnectorSummary>(`/organizations/${organizationId}/connectors/${connectorId}/login-provider`, { method: 'PATCH', body: JSON.stringify(input) }),
+  setLocalPasswordEnabled: (organizationId: string, enabled: boolean) => request<{ localPasswordEnabled: boolean }>(`/organizations/${organizationId}/authentication/local-password`, { method: 'PATCH', body: JSON.stringify({ enabled }) }),
+  createLocalUser: (organizationId: string, input: { email: string; displayName: string; password: string; role: PlatformOrganization['role'] }) =>
+    request<{ subject: string; email: string; displayName: string; role: PlatformOrganization['role'] }>(`/organizations/${organizationId}/local-users`, { method: 'POST', body: JSON.stringify(input) }),
+  createOrganization: (name: string) => request<PlatformOrganization>('/organizations', { method: 'POST', body: JSON.stringify({ name }) }),
   bootstrap: () => request<BootstrapData>('/bootstrap'),
   interview: (projectId: string, content: string) =>
     request<{ reply: string; project: Project }>(`/projects/${projectId}/interview`, {
@@ -39,17 +69,20 @@ export const api = {
   createBrowserApp: (input: { name: string; description: string; mode: AppTenancyMode }) =>
     request<{ detail: BrowserAppDetail }>('/browser-apps', { method: 'POST', body: JSON.stringify(input) }),
   browserApp: (appId: string) => request<BrowserAppDetail>(`/browser-apps/${appId}`),
-  reviseBrowserAppSpecification: (appId: string, expectedRevision: number, sections: BrowserAppDetail['specification']['sections']) =>
+  browserGenerationOptions: () => request<BrowserGenerationOptions>('/browser-apps/generation-options'),
+  reviseBrowserAppSpecification: (appId: string, expectedRevision: number, sections: BrowserAppDetail['specification']['sections'], structure: BrowserAppDetail['specification']['structure']) =>
     request<{ detail: BrowserAppDetail }>(`/browser-apps/${appId}/specification`, {
-      method: 'PATCH', body: JSON.stringify({ expectedRevision, sections }),
+      method: 'PATCH', body: JSON.stringify({ expectedRevision, sections, structure }),
     }),
-  generateBrowserApp: (appId: string, instruction: string) =>
-    request<{ plan: { accent: string; headline: string; agent: string }; detail: BrowserAppDetail }>(`/browser-apps/${appId}/generate`, {
+  generateBrowserApp: (appId: string, instruction: string, generationProfile: BrowserGenerationProfile) =>
+    request<{ plan: { accent: string; headline: string; agent: string; workers: Array<BrowserGenerationAgentConfiguration & { agent: string }> }; attempts: number; failures: string[]; detail: BrowserAppDetail }>(`/browser-apps/${appId}/generate`, {
       method: 'POST',
-      body: JSON.stringify({ instruction }),
+      body: JSON.stringify({ instruction, generationProfile }),
     }),
   buildBrowserApp: (appId: string) =>
     request<{ detail: BrowserAppDetail }>(`/browser-apps/${appId}/build`, { method: 'POST' }),
+  promoteBrowserAppRelease: (appId: string, releaseId: string) =>
+    request<{ detail: BrowserAppDetail }>(`/browser-apps/${appId}/releases/${releaseId}/promote`, { method: 'POST' }),
   previewTenancy: (appId: string, mode: AppTenancyMode) =>
     request<{ fromMode: AppTenancyMode; toMode: AppTenancyMode; totalRecords: number; scopedRecords: number; unscopedPrivateRecords: number; preservesExistingTenantAssignments: boolean; requiresDefaultTenant: boolean }>(`/browser-apps/${appId}/tenancy/preview`, { method: 'POST', body: JSON.stringify({ mode }) }),
   configureTenancy: (appId: string, mode: AppTenancyMode, organizationLabel: string, defaultTenantId?: string) =>

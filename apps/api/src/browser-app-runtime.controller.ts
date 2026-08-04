@@ -82,6 +82,17 @@ export class BrowserAppRuntimeController {
     return this.runtime.connector(appKey, connectorId, action, body, req, res, this.base(appKey, req));
   }
 
+  @Post(':appKey/_or/agents/:agentId/turn')
+  agentTurn(
+    @Param('appKey') appKey: string,
+    @Param('agentId') agentId: string,
+    @Body() body: unknown,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    return this.runtime.agentTurn(appKey, agentId, body, req, res, this.base(appKey, req));
+  }
+
   @Get(':appKey/_or/assets/:buildId/app.js')
   async javascript(@Param('appKey') appKey: string, @Param('buildId') buildId: string, @Res() res: Response) {
     const app = await this.repository.findApp(appKey);
@@ -118,15 +129,27 @@ export class BrowserAppRuntimeController {
 
   private async shell(appKey: string, req: Request, res: Response) {
     const app = await this.repository.findApp(appKey);
-    const active = app ? await this.repository.activeRelease(app.id) : null;
+    let active = app ? await this.repository.activeRelease(app.id) : null;
+    const base = app ? this.base(app.publicKey, req) : this.base(appKey, req);
+    const previewId = typeof req.query.preview === 'string' ? req.query.preview : undefined;
+    const previewToken = typeof req.query.token === 'string' ? req.query.token : undefined;
+    if (app && previewId && previewToken) {
+      const preview = await this.repository.release(app.id, previewId);
+      if (preview?.release.status === 'preview' && preview.release.previewToken === previewToken) {
+        active = preview;
+      }
+      else return res.status(404).send('Application preview not found');
+    }
     if (!app || !active || !active.build.artifactFileId) return res.status(404).send('Application release not found');
-    const base = this.base(app.publicKey, req);
     const title = this.escape(app.name);
     res.setHeader('content-type', 'text/html; charset=utf-8');
-    res.setHeader('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+    res.setHeader('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'; manifest-src 'none'");
     res.setHeader('x-content-type-options', 'nosniff');
-    res.setHeader('referrer-policy', 'strict-origin-when-cross-origin');
-    return res.send(`<!doctype html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><meta name="theme-color" content="${active.build.themeColor || '#090b13'}"/><title>${title}</title><link rel="stylesheet" href="${base}/_or/assets/${active.build.id}/app.css"/></head><body><div id="root" data-base="${base}"></div><script type="module" src="${base}/_or/assets/${active.build.id}/app.js"></script></body></html>`);
+    res.setHeader('referrer-policy', 'no-referrer');
+    const previewContract = active.release.status === 'preview'
+      ? ` data-preview-release="${this.escape(active.release.id)}" data-preview-token="${this.escape(active.release.previewToken ?? '')}"`
+      : '';
+    return res.send(`<!doctype html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><meta name="theme-color" content="${active.build.themeColor || '#090b13'}"/><title>${title}</title><link rel="stylesheet" href="${base}/_or/assets/${active.build.id}/app.css"/></head><body><div id="root" data-base="${base}"${previewContract}></div><script type="module" src="${base}/_or/assets/${active.build.id}/app.js"></script></body></html>`);
   }
 
   private base(appKey: string, req?: Request): string {
@@ -137,4 +160,5 @@ export class BrowserAppRuntimeController {
   private escape(value: string): string {
     return value.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!);
   }
+
 }

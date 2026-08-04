@@ -61,6 +61,7 @@ export function BuilderStudio({
         <div className="editor-grid">
           <label className="field"><span><Cpu size={14} /> Connector</span><select value={draft.connector} onChange={(e) => setDraft({ ...draft, connector: e.target.value })}>{connectors.filter((c) => c.kind === 'llm').map((connector) => <option value={connector.id} key={connector.id}>{connector.name}{connector.configured ? '' : ' · unavailable'}</option>)}</select></label>
           <label className="field"><span><SlidersHorizontal size={14} /> Model</span><input value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value })} /></label>
+          <label className="field"><span><SlidersHorizontal size={14} /> Reasoning effort</span><select value={draft.effort ?? 'medium'} onChange={(e) => setDraft({ ...draft, effort: e.target.value as BuilderAgent['effort'] })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label>
         </div>
         <label className="field field--large"><span>Hidden platform instructions</span><textarea value={draft.instructions} onChange={(e) => setDraft({ ...draft, instructions: e.target.value })} /></label>
         <div className="capability-section">

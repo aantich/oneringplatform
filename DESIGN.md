@@ -48,7 +48,7 @@ Land ICP → expand into **enterprise dev/platform teams** as those accounts gro
 ### 2.4 Strategic risks to plan around
 1. Vercel/Cloudflare extending "AI Cloud" into the full bundle.
 2. Hyperscaler agent-governance services annexing the enterprise layer from above.
-3. "Assemble WorkOS + Clerk + Langfuse yourself" as a DIY alternative — countered by the fact that *maintaining* those integrations across multitenancy boundaries is exactly the toil our opinionated framework absorbs.
+3. "Assemble identity, agent observability, and tenancy plumbing yourself" as a DIY alternative — countered by the fact that *maintaining* those integrations across multitenancy boundaries is exactly the toil our opinionated framework absorbs.
 
 **Tailwind:** TypeScript became the #1 language on GitHub in 2025, explicitly attributed to AI-assisted coding — a direct validation of a TS-first, AI-codegen-first bet.
 
@@ -360,7 +360,10 @@ release
  ├─ policyRevision
  ├─ connectorRevision
  ├─ themeRevision
- ├─ builderSystemVersion
+ ├─ generationProfile[]
+ │   ├─ builder template ID + immutable template version
+ │   ├─ connector + model
+ │   └─ reasoning effort
  └─ compiledArtifactDigest
 ```
 
@@ -369,10 +372,19 @@ The PRD/spec remains authoritative in hosted managed mode. Module revisions are 
 ### 7.5 Server-side generation and release pipeline
 
 ```text
-interview → approved spec → oneringai generation plan → immutable module graph in Mongo
+interview → approved spec → user-selected oneringai generation team → immutable module graph in Mongo
           → graph/policy/schema validation → isolated bundle/test worker
           → immutable JS/CSS artifact → preview → promote active-release pointer
 ```
+
+The tenant selects one to three enabled builder specialists and independently
+chooses a configured connector, an active model from that connector's
+OneRingAI catalog, and low/medium/high reasoning effort for each. Templates are
+resolved server-side so hidden instructions remain platform-owned. Specialists
+run sequentially over an accumulated proposal; the common default is an
+implementation lead followed by an independent reviewer. The resolved template
+versions and model configuration are pinned to the app revision, build, and
+release provenance.
 
 The oneringai builder orchestrator runs as a shared platform service and receives no production data-plane credential. A pooled ephemeral worker bundles a pinned graph revision using approved packages, with package lifecycle scripts and ambient network disabled. It produces hashed JS/CSS, verification evidence, and provenance, then terminates. Browser-native apps therefore require build-time isolation but no per-app runtime container.
 
@@ -521,10 +533,10 @@ Required/selected packages and infrastructure are deliberately small:
 
 - Present: React, Vite, `react-router-dom`, NestJS, Zod, oneringai, Vitest.
 - Added for this profile: official `mongodb` driver/GridFS, `ajv` + `ajv-formats`, `jose`, and `esbuild`.
-- Next production hardening: shared runtime-client/spec/policy packages; distributed rate-limit/cache store; OTel; object-storage client; edge/domain provider adapter; Playwright browser suite; property-based policy tests; production identity broker adapter.
+- Next production hardening: shared runtime-client/spec/policy packages; distributed rate-limit/cache store; OTel; object-storage client; edge/domain provider adapter; Playwright browser suite; property-based policy tests; KMS wrapping and rotation for connector secrets.
 - Do not add Mongoose to the dynamic shared gateway, a browser TypeScript compiler, a generic HTTP proxy, per-app runtime containers, or unrestricted npm dependencies.
 
-Local development attaches to the shared MongoDB exposed on `127.0.0.1:27017` by the sibling `~/dev/icos` Docker stack; this repository must not start a competing Mongo process or container. Platform development data lives in the dedicated `oneringplatform` database, while integration tests create and remove only `oneringplatform_test`. It uses GridFS artifacts, path routing through Vite, exact hostname resolution through the Nest ingress, and a local-only role switch. Production replaces only infrastructure adapters—Atlas, object storage/CDN, edge/custom-hostname TLS, distributed quotas, KMS/secret broker, and real OIDC—not the application graph or runtime API contracts.
+Local development attaches to the shared MongoDB exposed on `127.0.0.1:27017` by the sibling `~/dev/icos` Docker stack; this repository must not start a competing Mongo process or container. Platform development data lives in the dedicated `oneringplatform` database, while integration tests create and remove only `oneringplatform_test`. It uses GridFS artifacts, path routing through Vite, exact hostname resolution through the Nest ingress, the ICOS-derived connector-login flow, and a local-only role switch. Production replaces only infrastructure adapters—Atlas, object storage/CDN, edge/custom-hostname TLS, distributed quotas, and KMS key wrapping—not the application graph, connector identity flow, or runtime API contracts.
 
 ---
 
@@ -537,14 +549,14 @@ All injected at NestJS seams via the golden base image; the app author writes no
 | **Tenant context** | Ambient `{userId, tenantId}` via `AsyncLocalStorage`, set by a guard at every entry point; readable everywhere incl. DB hooks | icos `ExecutionContext` pattern + `ever-tenant` |
 | **Multitenancy** | Row-level scoping auto-stamped on insert / injected on read via a Mongoose plugin; **fail-loud** if no context; cross-tenant writes blocked + logged | icos `groupScopingHooks` + `ever-tenant` `TenantMongoCollection` |
 | **RBAC / permissions** | Framework-agnostic authorization engine (users/groups/roles/permissions + per-resource ownership); enforced via NestJS `@UseGuards` | `iam` / **XIAM** |
-| **Enterprise SSO/SCIM** | The IdP handshake that *cannot* be fully automated → **WorkOS or Stytch** + an embeddable Admin Portal for tenant self-service | new (buy) |
+| **Tenant login / SSO** | Tenant admin designates a Google or Microsoft OAuth authorization-code connector as a login provider; OneRingAI owns configuration, PKCE, tokens, and provider access | icos auth flow + oneringai connectors |
 | **Audit** | Drop-in audited collections (create/update/delete/view + diffs + query API) | icos **NimbleAudit** |
 | **Observability** | OTel SDK pre-wired → platform collector; LLM/agent spans (OpenLLMetry/OpenInference) | new wiring + `ever-telemetry` (logging) |
 | **Config** | Declared, code-generated typed config (scope + sensitivity); no raw `process.env` in app code | `ever-config` |
 | **Secrets** | App bootstrap identity injected at schedule time; end-tenant secrets fetched just-in-time from a broker using request identity and per-tenant DEKs | icos `groupKeyManager` + `ever-tenant` wallet |
 | **Cost controls** | Per-tenant budgets/rate limits at the LLM gateway + interceptors | new + oneringai resilience |
 
-**Auth split worth noting:** XIAM owns *app-level* RBAC + resource ownership; **WorkOS/Stytch** owns *enterprise-connection* SSO/SCIM (the customer-IT handshake no vendor can automate). Stytch is strongest for agent/MCP auth if we productize agent identities.
+**Auth split worth noting:** the platform owns memberships, permissions, and resource ownership. OneRingAI connectors authenticate users through tenant-configured Google/Microsoft OAuth. Connector authentication proves identity; it never replaces server-side authorization.
 
 **Enforcement boundary:** NestJS guards, `AsyncLocalStorage`, and Mongoose plugins protect the standard platform path and prevent accidental cross-tenant access. They are not a hostile-code security boundary: code with a raw database credential can bypass framework hooks. Managed/certified apps therefore cannot receive raw DB credentials and must use an enforceable platform data-access façade or broker. Code-mode apps may receive an app-scoped database credential, but their authors are then trusted with data inside that app database; microVM isolation still protects the platform and other apps.
 
@@ -655,6 +667,13 @@ Porting rule: extract framework-independent TypeScript packages and translate Re
 
 ## 13. Isolation & security model
 
+The normative identity, authorization, customer-organization, nested app
+tenancy, dedicated control-plane console, and migration contract is defined in
+[`docs/SUPERADMIN_TENANCY_ARCHITECTURE.md`](docs/SUPERADMIN_TENANCY_ARCHITECTURE.md).
+It distinguishes global platform roles, platform-organization memberships,
+app/environment workloads, and app end-tenant memberships and requires explicit
+permission checks at every boundary.
+
 - **Three distinct identities:** a platform organization owns projects/apps; each app has isolated environments/releases; the deployed app may itself serve many end tenants. Never use an unqualified `tenantId` across these layers.
 - **Infrastructure boundary:** app and workspace code is hostile toward the control plane, other customers, and the host. Use a sandbox boundary, non-root/read-only runtime, resource quotas, network policy, scoped workload identity, and no ambient cloud/control-plane credentials.
 - **Application-data boundary:** an app gets its own DB/namespace and identity. Standard framework tenant scoping protects its end tenants from application mistakes. Managed/certified apps use a platform data-access façade so generated code cannot bypass that scoping; code-mode authors with raw app DB access are trusted with data inside their own app.
@@ -695,7 +714,7 @@ Porting rule: extract framework-independent TypeScript packages and translate Re
 | Source/release service | everworker contract/versioning concepts | Canonical commits, manifests, environments, immutable releases, promotion/rollback |
 | Build pipeline | — | Hermetic build, tests/scans, SBOM/provenance/signing, base image + source → registry |
 | Reactive layer | — | Optional app event relay (change streams + resume/backpressure → WS) |
-| Enterprise SSO/SCIM | — | Integrate WorkOS/Stytch + Admin Portal |
+| Tenant login / SSO | oneringai connectors + icos connector-login pattern | NestJS control-plane adapter and tenant-admin UI |
 | Durable execution | — | Integrate DBOS (+ resolve Postgres tension) |
 | App generation pipeline | — | **New** (interview → spec → generate → verify → preview) |
 
@@ -741,7 +760,7 @@ The major new systems are the hosted development plane, canonical source/release
 | D7 | Data = **shared Atlas with shared namespaced collections or logical DB per app** | ✅ Agreed | Browser-data free tier may use bounded app/entity namespaces; dedicated clusters only for whales |
 | D8 | Next.js/SSR = **deferred, additive** | ✅ Agreed | Astro/Next as separate deployable when needed |
 | D9 | Language = **TS-first, Python later** | ✅ Agreed | Reflex/Django candidates |
-| D10 | Enterprise SSO/SCIM = **buy (WorkOS/Stytch)**; app RBAC = **XIAM** | 🟡 Proposed | Confirm vendor |
+| D10 | Identity = **tenant-designated OneRingAI Google/Microsoft connectors**; authorization remains platform-owned; local passwords are test-only | ✅ Locked | Reuses ICOS connector-login architecture; no third-party identity broker |
 | D11 | Durable execution = **DBOS default, Temporal escape hatch** | 🟡 Proposed | Blocked on Postgres/Mongo tension (§18) |
 | D12 | **Dual-path product**: hosted oneringai development + local Codex/Claude/human development | ✅ Agreed | Both converge on the same source/release service |
 | D13 | Source authority is mode-specific: **spec in managed mode; Git in code mode** | ✅ Locked | Avoids pretending arbitrary edits round-trip losslessly |
@@ -768,6 +787,12 @@ The major new systems are the hosted development plane, canonical source/release
 | D34 | Theme publication requires server-side contract, CSS-safety, and accessibility gates | ✅ Locked | Client preview is advisory; the server compiler and admission checks are authoritative |
 | D35 | Browser-native apps choose one versioned audience mode: **personal, team, or multi-organization** | ✅ Locked | User count is independent of platform ownership; the choice is an early PRD/interview decision |
 | D36 | Multi-organization isolation is membership-derived and server injected | ✅ Locked | `EndTenantMembership` bears roles; signed sessions select an authorized tenant; every private data and connector operation is scoped and negative-tested |
+| D37 | Platform superadmin roles are global assignments, never implied by customer-organization membership | ✅ Locked | Global APIs require explicit permissions; no authenticated-user fallback |
+| D38 | Customer developers operate inside an explicit active **platform organization** that owns apps, releases, secrets, usage, and billing | ✅ Locked | Users may belong to several organizations; resource ownership and active context must both authorize access |
+| D39 | A deployed app's `endTenantId` is nested under `appId + environmentId` and can never confer control-plane access | ✅ Locked | Control-plane and app-runtime sessions use different audiences and policy domains |
+| D40 | The One Ring console is a dedicated first-party control-plane application, not a tenant-created or generated app | ✅ Locked | UI libraries may be shared; source, release process, runtime identity, API audience, and infrastructure remain separate |
+| D41 | Organization tenants can develop and deploy multi-tenant apps inside One Ring using the shared spec/build/release/runtime pipeline | ✅ Locked | The owning organization and the app's end tenants remain distinct |
+| D42 | General workflows are versioned app artifacts executed by platform-hosted durable workers before custom full-stack workers are introduced | 🟡 Proposed | Browser profile starts declarative; later code workers retain the same release, identity, audit, and tenancy contract |
 
 ---
 

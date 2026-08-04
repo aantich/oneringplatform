@@ -15,5 +15,6 @@ if [ -z "${MONGO_TEST_URI:-}" ]; then
   fi
 fi
 
-export MONGO_TEST_URI
+LOCAL_DEV_AUTH=1
+export MONGO_TEST_URI LOCAL_DEV_AUTH
 exec npx vitest run

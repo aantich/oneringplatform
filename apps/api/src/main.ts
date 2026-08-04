@@ -1,11 +1,11 @@
 import 'reflect-metadata';
-import dotenv from 'dotenv';
 import { RequestMethod } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module.js';
 import { BrowserAppRepository } from './browser-app.repository.js';
+import { loadPlatformEnvironment } from './environment.js';
 
-dotenv.config({ path: process.env.ONERINGAI_ENV_FILE ?? '.env', quiet: true });
+loadPlatformEnvironment();
 
 async function bootstrap(): Promise<void> {
   if (process.env.NODE_ENV === 'production') {

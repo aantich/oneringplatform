@@ -14,11 +14,15 @@ import {
 } from 'mongodb';
 import type {
   AppBuild,
+  AppGraphChangeSet,
   AppMembership,
   AppModuleRecord,
+  AppStructuredSpecification,
+  BrowserAgentRecord,
   BrowserApp,
   BrowserAppDetail,
   BrowserAppSpecification,
+  BrowserGenerationProfile,
   BrowserRelease,
   ConnectorActionRecord,
   DataSchemaRecord,
@@ -33,6 +37,7 @@ import type {
 import {
   runtimeCss,
   seedBindings,
+  seedAgents,
   seedBrowserApp,
   seedBrowserAppSpecification,
   seedConnectors,
@@ -46,6 +51,37 @@ import {
   seedTenancy,
   seedTasks,
 } from './browser-app.seed.js';
+import type { OrganizationRole, PlatformRole } from './control-plane-auth.guard.js';
+
+export type PlatformOrganization = {
+  id: string;
+  slug: string;
+  name: string;
+  status: 'active' | 'suspended';
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PlatformMembership = {
+  id: string;
+  platformOrganizationId: string;
+  subject: string;
+  email?: string;
+  displayName: string;
+  role: OrganizationRole;
+  status: 'active' | 'invited' | 'suspended';
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type PlatformRoleAssignment = {
+  id: string;
+  subject: string;
+  role: PlatformRole;
+  status: 'active' | 'revoked';
+  createdAt: string;
+};
 
 @Injectable()
 export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
@@ -84,9 +120,56 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
     return this.db().collection<BrowserApp>('browser_apps').find().sort({ updatedAt: -1 }).toArray();
   }
 
+  async platformRoles(subject: string): Promise<PlatformRole[]> {
+    const assignments = await this.db().collection<PlatformRoleAssignment>('platform_role_assignments')
+      .find({ subject, status: 'active' }).toArray();
+    return assignments.map((assignment) => assignment.role);
+  }
+
+  platformMembership(subject: string, platformOrganizationId: string): Promise<PlatformMembership | null> {
+    return this.db().collection<PlatformMembership>('platform_memberships')
+      .findOne({ subject, platformOrganizationId });
+  }
+
+  async platformOrganizations(subject: string): Promise<Array<PlatformOrganization & { role: OrganizationRole }>> {
+    const memberships = await this.db().collection<PlatformMembership>('platform_memberships')
+      .find({ subject, status: 'active' }).toArray();
+    if (!memberships.length) return [];
+    const organizations = await this.db().collection<PlatformOrganization>('platform_organizations')
+      .find({ id: { $in: memberships.map((membership) => membership.platformOrganizationId) }, status: 'active' }).sort({ name: 1 }).toArray();
+    return organizations.map((organization) => ({
+      ...organization,
+      role: memberships.find((membership) => membership.platformOrganizationId === organization.id)!.role,
+    }));
+  }
+
+  async createPlatformOrganization(input: { name: string; subject: string; email?: string }): Promise<PlatformOrganization & { role: OrganizationRole }> {
+    const base = input.name.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 42) || 'organization';
+    let id = base;
+    for (let suffix = 1; await this.db().collection<PlatformOrganization>('platform_organizations').findOne({ id }); suffix += 1) id = `${base}-${suffix}`;
+    const now = new Date().toISOString();
+    const organization: PlatformOrganization = { id, slug: id, name: input.name, status: 'active', createdAt: now, updatedAt: now };
+    const membership: PlatformMembership = {
+      id: randomUUID(), platformOrganizationId: id, subject: input.subject,
+      ...(input.email ? { email: input.email } : {}),
+      displayName: input.email?.split('@')[0] ?? input.subject,
+      role: 'owner', status: 'active', version: 1, createdAt: now, updatedAt: now,
+    };
+    const session = this.client!.startSession();
+    try {
+      await session.withTransaction(async () => {
+        await this.db().collection<PlatformOrganization>('platform_organizations').insertOne(organization, { session });
+        await this.db().collection<PlatformMembership>('platform_memberships').insertOne(membership, { session });
+      });
+    } finally {
+      await session.endSession();
+    }
+    return { ...organization, role: 'owner' };
+  }
+
   async createAppGraph(input: {
     app: BrowserApp; specification: BrowserAppSpecification; modules: AppModuleRecord[]; routes: RouteDefinition[]; schemas: DataSchemaRecord[];
-    policies: EntityPolicyRecord[]; connectors: ConnectorActionRecord[]; theme: ThemeRevision;
+    policies: EntityPolicyRecord[]; connectors: ConnectorActionRecord[]; agents: BrowserAgentRecord[]; theme: ThemeRevision;
     tenancy: TenancyRevision; tenants: EndTenant[]; memberships: AppMembership[]; bindings: RouteBinding[];
   }): Promise<void> {
     const session = this.client!.startSession();
@@ -99,6 +182,7 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
         if (input.schemas.length) await this.db().collection<DataSchemaRecord>('app_schemas').insertMany(input.schemas, { session });
         if (input.policies.length) await this.db().collection<EntityPolicyRecord>('app_policies').insertMany(input.policies, { session });
         if (input.connectors.length) await this.db().collection<ConnectorActionRecord>('app_connectors').insertMany(input.connectors, { session });
+        if (input.agents.length) await this.db().collection<BrowserAgentRecord>('app_agents').insertMany(input.agents, { session });
         await this.db().collection<ThemeRevision>('app_themes').insertOne(input.theme, { session });
         await this.db().collection<TenancyRevision>('app_tenancy_revisions').insertOne(input.tenancy, { session });
         if (input.tenants.length) await this.db().collection<EndTenant>('app_end_tenants').insertMany(input.tenants, { session });
@@ -118,12 +202,13 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
   async detail(appId: string): Promise<BrowserAppDetail | null> {
     const app = await this.findApp(appId);
     if (!app) return null;
-    const [modules, routes, schemas, policies, connectors, builds, releases, bindings, themes, tenancyRevisions, endTenants, memberships, tenancyMigrations, specification] = await Promise.all([
+    const [modules, routes, schemas, policies, connectors, agents, builds, releases, bindings, themes, tenancyRevisions, endTenants, memberships, tenancyMigrations, specification] = await Promise.all([
       this.modules(app.id, app.sourceRevision),
       this.routes(app.id, app.sourceRevision),
       this.schemas(app.id, app.schemaRevision),
       this.policies(app.id, app.policyRevision),
       this.connectors(app.id, app.connectorRevision),
+      this.agents(app.id, app.sourceRevision),
       this.db().collection<AppBuild>('app_builds').find({ appId: app.id }).sort({ createdAt: -1 }).limit(10).toArray(),
       this.db().collection<BrowserRelease>('browser_releases').find({ appId: app.id }).sort({ createdAt: -1 }).toArray(),
       this.db().collection<RouteBinding>('route_bindings').find({ appId: app.id }).sort({ canonical: -1 }).toArray(),
@@ -137,7 +222,7 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
     const tenancy = tenancyRevisions.find((candidate) => candidate.revision === app.tenancyRevision);
     if (!tenancy) throw new Error(`Tenancy revision ${app.tenancyRevision} not found`);
     if (!specification) throw new Error(`Specification revision ${app.specRevision} not found`);
-    return { app, modules, routes, schemas, policies, connectors, builds, releases, bindings, themes, tenancy, tenancyRevisions, endTenants, memberships, tenancyMigrations, specification };
+    return { app, modules, routes, schemas, policies, connectors, agents, builds, releases, bindings, themes, tenancy, tenancyRevisions, endTenants, memberships, tenancyMigrations, specification };
   }
 
   modules(appId: string, revision: number): Promise<AppModuleRecord[]> {
@@ -158,6 +243,16 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
 
   connectors(appId: string, revision: number): Promise<ConnectorActionRecord[]> {
     return this.db().collection<ConnectorActionRecord>('app_connectors').find({ appId, revision }).toArray();
+  }
+
+  agents(appId: string, revision: number): Promise<BrowserAgentRecord[]> {
+    return this.db().collection<BrowserAgentRecord>('app_agents').find({ appId, revision }).sort({ name: 1 }).toArray();
+  }
+
+  async agent(appId: string, id: string, revision?: number): Promise<BrowserAgentRecord | null> {
+    const sourceRevision = revision ?? (await this.findApp(appId))?.sourceRevision;
+    if (sourceRevision === undefined) return null;
+    return this.db().collection<BrowserAgentRecord>('app_agents').findOne({ appId, revision: sourceRevision, id });
   }
 
   themes(appId: string): Promise<ThemeRevision[]> {
@@ -372,6 +467,51 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
     return this.activateReleaseAttempt(release, true);
   }
 
+  async publishPreview(release: BrowserRelease): Promise<BrowserRelease> {
+    const session = this.client!.startSession();
+    let published = release;
+    try {
+      await session.withTransaction(async () => {
+        const releases = this.db().collection<BrowserRelease>('browser_releases');
+        const existing = await releases.findOne({ appId: release.appId, releaseKey: release.releaseKey }, { session });
+        if (existing?.status === 'active') {
+          published = existing;
+          return;
+        }
+        published = existing ? { ...existing, ...release, id: existing.id } : release;
+        if (existing) await releases.replaceOne({ id: existing.id }, published, { session });
+        else await releases.insertOne(published, { session });
+        await releases.updateMany(
+          { appId: release.appId, id: { $ne: published.id }, status: 'preview' },
+          { $set: { status: 'superseded' }, $unset: { previewToken: '' } }, { session },
+        );
+        const result = await this.db().collection<BrowserApp>('browser_apps').updateOne(
+          {
+            id: release.appId, specRevision: release.specRevision, sourceRevision: release.sourceRevision,
+            schemaRevision: release.schemaRevision, policyRevision: release.policyRevision,
+            connectorRevision: release.connectorRevision, themeRevision: release.themeRevision,
+            tenancyRevision: release.tenancyRevision,
+          },
+          { $set: { previewReleaseId: published.id, updatedAt: release.createdAt } }, { session },
+        );
+        if (result.matchedCount !== 1) throw new Error('Application changed while the preview was building');
+      });
+      return published;
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  async promotePreview(appId: string, releaseId: string): Promise<BrowserRelease> {
+    const release = await this.db().collection<BrowserRelease>('browser_releases').findOne({ appId, id: releaseId });
+    if (!release || release.status !== 'preview') throw new Error('Preview release not found');
+    const promoted: BrowserRelease = {
+      ...release, environment: 'production', status: 'active', createdAt: new Date().toISOString(),
+    };
+    delete promoted.previewToken;
+    return this.activateRelease(promoted);
+  }
+
   private async activateReleaseAttempt(release: BrowserRelease, retryDuplicate: boolean): Promise<BrowserRelease> {
     const session = this.client!.startSession();
     let activated = release;
@@ -379,20 +519,33 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
       await session.withTransaction(async () => {
         const releases = this.db().collection<BrowserRelease>('browser_releases');
         const existing = await releases.findOne({ appId: release.appId, releaseKey: release.releaseKey }, { session });
-        activated = existing ? { ...existing, status: 'active' } : release;
+        // The immutable release-key winner owns the release ID and artifact.
+        // A later activation of the same tuple (rollback or concurrent build)
+        // must point at that stored winner, never at an uninserted candidate ID.
+        activated = existing
+          ? { ...release, ...existing, environment: 'production', status: 'active', createdAt: release.createdAt }
+          : release;
+        delete activated.previewToken;
         if (!existing) await releases.insertOne(release, { session });
         await releases.updateMany(
           { appId: release.appId, id: { $ne: activated.id }, status: 'active' },
           { $set: { status: 'superseded' } }, { session },
         );
-        await releases.updateOne({ id: activated.id }, { $set: { status: 'active' } }, { session });
+        await releases.updateOne(
+          { id: activated.id },
+          {
+            $set: { environment: 'production', status: 'active', createdAt: activated.createdAt },
+            $unset: { previewToken: '' },
+          },
+          { session },
+        );
         const result = await this.db().collection<BrowserApp>('browser_apps').updateOne(
           {
             id: release.appId, sourceRevision: release.sourceRevision, schemaRevision: release.schemaRevision,
             policyRevision: release.policyRevision, connectorRevision: release.connectorRevision,
             themeRevision: release.themeRevision, tenancyRevision: release.tenancyRevision,
           },
-          { $set: { activeReleaseId: activated.id, updatedAt: release.createdAt } }, { session },
+          { $set: { activeReleaseId: activated.id, updatedAt: release.createdAt }, $unset: { previewReleaseId: '' } }, { session },
         );
         if (result.matchedCount !== 1) throw new Error('Application changed while the release was building');
       });
@@ -417,6 +570,27 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
     if (!release) return null;
     const build = await this.findBuild(release.buildId);
     return build ? { release, build } : null;
+  }
+
+  async release(appId: string, releaseId: string): Promise<{ release: BrowserRelease; build: AppBuild } | null> {
+    const release = await this.db().collection<BrowserRelease>('browser_releases').findOne({ appId, id: releaseId });
+    if (!release) return null;
+    const build = await this.findBuild(release.buildId);
+    return build ? { release, build } : null;
+  }
+
+  async expireIncompatiblePreviews(appId: string, runtimeVersion: number, generatorVersion: string): Promise<void> {
+    const incompatible = await this.db().collection<BrowserRelease>('browser_releases').find({
+      appId, status: 'preview', $or: [{ runtimeVersion: { $ne: runtimeVersion } }, { generatorVersion: { $ne: generatorVersion } }],
+    }).project<{ id: string }>({ id: 1 }).toArray();
+    if (!incompatible.length) return;
+    const ids = incompatible.map((release) => release.id);
+    await this.db().collection<BrowserRelease>('browser_releases').updateMany(
+      { appId, id: { $in: ids } }, { $set: { status: 'superseded' }, $unset: { previewToken: '' } },
+    );
+    await this.db().collection<BrowserApp>('browser_apps').updateOne(
+      { id: appId, previewReleaseId: { $in: ids } }, { $unset: { previewReleaseId: '' } },
+    );
   }
 
   async resolveBinding(hostname: string, pathname: string): Promise<{ app: BrowserApp; binding: RouteBinding } | null> {
@@ -446,20 +620,29 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
     return this.findBinding(id);
   }
 
-  async entityConfig(appId: string, entity: string): Promise<{ schema: DataSchemaRecord; policy: EntityPolicyRecord } | null> {
-    const app = await this.findApp(appId);
-    if (!app) return null;
+  async entityConfig(
+    appId: string,
+    entity: string,
+    revisions?: { schemaRevision: number; policyRevision: number },
+  ): Promise<{ schema: DataSchemaRecord; policy: EntityPolicyRecord } | null> {
+    const app = revisions ? null : await this.findApp(appId);
+    const selected = revisions ?? (app ? { schemaRevision: app.schemaRevision, policyRevision: app.policyRevision } : null);
+    if (!selected) return null;
     const [schema, policy] = await Promise.all([
-      this.db().collection<DataSchemaRecord>('app_schemas').findOne({ appId, revision: app.schemaRevision, entity }),
-      this.db().collection<EntityPolicyRecord>('app_policies').findOne({ appId, revision: app.policyRevision, entity }),
+      this.db().collection<DataSchemaRecord>('app_schemas').findOne({ appId, revision: selected.schemaRevision, entity }),
+      this.db().collection<EntityPolicyRecord>('app_policies').findOne({ appId, revision: selected.policyRevision, entity }),
     ]);
     return schema && policy ? { schema, policy } : null;
   }
 
-  async findConnector(appId: string, id: string, action: string): Promise<ConnectorActionRecord | null> {
-    const app = await this.findApp(appId);
-    if (!app) return null;
-    return this.db().collection<ConnectorActionRecord>('app_connectors').findOne({ appId, revision: app.connectorRevision, id, action });
+  async findConnector(appId: string, id: string, action: string, revision?: number): Promise<ConnectorActionRecord | null> {
+    const connectorRevision = revision ?? (await this.findApp(appId))?.connectorRevision;
+    if (connectorRevision === undefined) return null;
+    return this.db().collection<ConnectorActionRecord>('app_connectors').findOne({ appId, revision: connectorRevision, id, action });
+  }
+
+  tenancyRevision(appId: string, revision: number): Promise<TenancyRevision | null> {
+    return this.db().collection<TenancyRevision>('app_tenancy_revisions').findOne({ appId, revision });
   }
 
   async consumeConnectorRate(key: string, maximum: number): Promise<boolean> {
@@ -531,6 +714,7 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
       return {
         ...item,
         revision: nextRevision,
+        requirementIds: item.requirementIds ?? [],
         description: patch?.description ?? (item.id === 'task-board-page' ? `${item.description} Agent revision: ${headline}` : item.description),
         source,
         contentHash: createHash('sha256').update(source).digest('hex'),
@@ -540,19 +724,154 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
     const nextRoutes = (await this.routes(app.id, app.sourceRevision)).map((stored) => {
       const { _id, ...route } = stored as RouteDefinition & { _id?: ObjectId };
       void _id;
-      return { ...route, revision: nextRevision };
+      return { ...route, revision: nextRevision, requirementIds: route.requirementIds ?? [] };
+    });
+    const nextAgents = (await this.agents(app.id, app.sourceRevision)).map((stored) => {
+      const { _id, ...agent } = stored as BrowserAgentRecord & { _id?: ObjectId };
+      void _id;
+      return { ...agent, revision: nextRevision, requirementIds: agent.requirementIds ?? [] };
     });
     const session = this.client!.startSession();
     try {
       await session.withTransaction(async () => {
         await this.db().collection<AppModuleRecord>('app_modules').insertMany(next, { session });
         await this.db().collection<RouteDefinition>('app_routes').insertMany(nextRoutes, { session });
+        if (nextAgents.length) await this.db().collection<BrowserAgentRecord>('app_agents').insertMany(nextAgents, { session });
         const updated = await this.db().collection<BrowserApp>('browser_apps').updateOne(
           { id: app.id, sourceRevision: app.sourceRevision },
-          { $set: { sourceRevision: nextRevision, updatedAt: new Date().toISOString(), agentAccent: accent, agentHeadline: headline } },
+          { $set: { sourceRevision: nextRevision, generatedFromSpecRevision: app.specRevision, updatedAt: new Date().toISOString(), agentAccent: accent, agentHeadline: headline } },
           { session },
         );
         if (updated.matchedCount !== 1) throw new Error('Application source changed while the agent revision was being written');
+      });
+    } finally {
+      await session.endSession();
+    }
+    return nextRevision;
+  }
+
+  async applyGraphChangeSet(
+    appId: string,
+    changeSet: AppGraphChangeSet,
+    accent: string,
+    headline: string,
+    generationProfile?: BrowserGenerationProfile,
+  ): Promise<number> {
+    const app = await this.findApp(appId);
+    if (!app) throw new Error('App not found');
+    const nextRevision = app.sourceRevision + 1;
+    const [storedModules, storedRoutes, storedAgents, storedSchemas, storedPolicies] = await Promise.all([
+      this.modules(app.id, app.sourceRevision), this.routes(app.id, app.sourceRevision), this.agents(app.id, app.sourceRevision),
+      this.schemas(app.id, app.schemaRevision), this.policies(app.id, app.policyRevision),
+    ]);
+    const strip = <T>(stored: T): T => {
+      const value = { ...stored } as T & { _id?: ObjectId };
+      delete value._id;
+      return value;
+    };
+    const moduleDeletes = new Set(changeSet.moduleDeletes);
+    const moduleUpserts = new Map(changeSet.moduleUpserts.map((item) => [item.id, item]));
+    const modules = storedModules.filter((item) => !moduleDeletes.has(item.id)).map((stored) => {
+      const current = strip(stored);
+      const patch = moduleUpserts.get(current.id);
+      if (patch) moduleUpserts.delete(current.id);
+      const source = patch?.source ?? current.source;
+      return {
+        ...current, ...patch, appId: app.id, revision: nextRevision,
+        requirementIds: patch?.requirementIds ?? current.requirementIds ?? [],
+        contentHash: createHash('sha256').update(source).digest('hex'), createdAt: new Date().toISOString(),
+      } as AppModuleRecord;
+    });
+    for (const patch of moduleUpserts.values()) {
+      modules.push({
+        ...patch, appId: app.id, revision: nextRevision, propsSchema: undefined,
+        contentHash: createHash('sha256').update(patch.source).digest('hex'), createdAt: new Date().toISOString(),
+      });
+    }
+
+    const routeDeletes = new Set(changeSet.routeDeletes);
+    const routeUpserts = new Map(changeSet.routeUpserts.map((item) => [item.id, item]));
+    const routes = storedRoutes.filter((item) => !routeDeletes.has(item.id)).map((stored) => {
+      const current = strip(stored);
+      const patch = routeUpserts.get(current.id);
+      if (patch) routeUpserts.delete(current.id);
+      return { ...current, ...patch, appId: app.id, revision: nextRevision, requirementIds: patch?.requirementIds ?? current.requirementIds ?? [] } as RouteDefinition;
+    });
+    for (const patch of routeUpserts.values()) routes.push({ ...patch, appId: app.id, revision: nextRevision });
+
+    const agentDeletes = new Set(changeSet.agentDeletes);
+    const agentUpserts = new Map(changeSet.agentUpserts.map((item) => [item.id, item]));
+    const agents = storedAgents.filter((item) => !agentDeletes.has(item.id)).map((stored) => {
+      const current = strip(stored);
+      const patch = agentUpserts.get(current.id);
+      if (patch) agentUpserts.delete(current.id);
+      return { ...current, ...patch, appId: app.id, revision: nextRevision, requirementIds: patch?.requirementIds ?? current.requirementIds ?? [] } as BrowserAgentRecord;
+    });
+    for (const patch of agentUpserts.values()) agents.push({ ...patch, appId: app.id, revision: nextRevision });
+
+    const schemasChanged = changeSet.schemaUpserts.length > 0 || changeSet.schemaDeletes.length > 0;
+    const nextSchemaRevision = schemasChanged ? app.schemaRevision + 1 : app.schemaRevision;
+    const schemaDeletes = new Set(changeSet.schemaDeletes);
+    const schemaUpserts = new Map(changeSet.schemaUpserts.map((item) => [item.id, item]));
+    const schemas = schemasChanged ? storedSchemas.filter((item) => !schemaDeletes.has(item.id)).map((stored) => {
+      const current = strip(stored);
+      const patch = schemaUpserts.get(current.id);
+      if (patch) schemaUpserts.delete(current.id);
+      const merged = { ...current, ...patch };
+      return {
+        ...merged, appId: app.id, revision: nextSchemaRevision,
+        physicalCollection: this.expectedPhysicalCollection(app.id, merged.entity),
+        requirementIds: patch?.requirementIds ?? current.requirementIds ?? [],
+      } as DataSchemaRecord;
+    }) : storedSchemas;
+    for (const patch of schemaUpserts.values()) schemas.push({
+      ...patch, appId: app.id, revision: nextSchemaRevision,
+      physicalCollection: this.expectedPhysicalCollection(app.id, patch.entity),
+    });
+
+    const policiesChanged = changeSet.policyUpserts.length > 0 || changeSet.policyDeletes.length > 0;
+    const nextPolicyRevision = policiesChanged ? app.policyRevision + 1 : app.policyRevision;
+    const policyDeletes = new Set(changeSet.policyDeletes);
+    const policyUpserts = new Map(changeSet.policyUpserts.map((item) => [item.id, item]));
+    const policies = policiesChanged ? storedPolicies.filter((item) => !policyDeletes.has(item.id)).map((stored) => {
+      const current = strip(stored);
+      const patch = policyUpserts.get(current.id);
+      if (patch) policyUpserts.delete(current.id);
+      return {
+        ...current, ...patch, appId: app.id, revision: nextPolicyRevision,
+        requirementIds: patch?.requirementIds ?? current.requirementIds ?? [],
+      } as EntityPolicyRecord;
+    }) : storedPolicies;
+    for (const patch of policyUpserts.values()) policies.push({ ...patch, appId: app.id, revision: nextPolicyRevision });
+
+    if (!modules.length || !routes.length) throw new Error('A generated graph must retain at least one module and route');
+    const moduleIds = new Set(modules.map((item) => item.id));
+    if (routes.some((route) => !moduleIds.has(route.pageModuleId))) throw new Error('A generated route references a missing page module');
+    if (new Set(routes.map((route) => route.path)).size !== routes.length) throw new Error('Generated routes must have unique paths');
+    if (new Set(schemas.map((schema) => schema.entity)).size !== schemas.length) throw new Error('Generated entities must have unique data schemas');
+    if (new Set(policies.map((policy) => policy.entity)).size !== policies.length) throw new Error('Generated entities must have unique policies');
+    for (const schema of schemas) if (!policies.some((policy) => policy.entity === schema.entity)) throw new Error(`Generated entity ${schema.entity} has no policy`);
+    for (const policy of policies) if (!schemas.some((schema) => schema.entity === policy.entity)) throw new Error(`Generated policy ${policy.id} has no schema`);
+
+    const session = this.client!.startSession();
+    try {
+      await session.withTransaction(async () => {
+        await this.db().collection<AppModuleRecord>('app_modules').insertMany(modules, { session });
+        await this.db().collection<RouteDefinition>('app_routes').insertMany(routes, { session });
+        if (agents.length) await this.db().collection<BrowserAgentRecord>('app_agents').insertMany(agents, { session });
+        if (schemasChanged && schemas.length) await this.db().collection<DataSchemaRecord>('app_schemas').insertMany(schemas, { session });
+        if (policiesChanged && policies.length) await this.db().collection<EntityPolicyRecord>('app_policies').insertMany(policies, { session });
+        const updated = await this.db().collection<BrowserApp>('browser_apps').updateOne(
+          { id: app.id, sourceRevision: app.sourceRevision, schemaRevision: app.schemaRevision, policyRevision: app.policyRevision },
+          { $set: {
+            sourceRevision: nextRevision, schemaRevision: nextSchemaRevision, policyRevision: nextPolicyRevision,
+            generatedFromSpecRevision: app.specRevision,
+            updatedAt: new Date().toISOString(), agentAccent: accent, agentHeadline: headline,
+            ...(generationProfile ? { generationProfile } : {}),
+          } },
+          { session },
+        );
+        if (updated.matchedCount !== 1) throw new Error('Application source changed while the graph revision was being written');
       });
     } finally {
       await session.endSession();
@@ -564,12 +883,13 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
     appId: string,
     expectedRevision: number,
     sections: BrowserAppSpecification['sections'],
+    structure: BrowserAppSpecification['structure'],
     createdAt: string,
   ): Promise<BrowserAppSpecification> {
     const next: BrowserAppSpecification = {
       id: randomUUID(), appId, revision: expectedRevision + 1,
       projectId: (await this.findApp(appId))?.projectId ?? appId,
-      status: 'approved', sections, createdAt,
+      status: 'approved', sections, structure, createdAt,
     };
     const session = this.client!.startSession();
     try {
@@ -591,8 +911,31 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async restoreSourceRevision(appId: string, sourceRevision: number): Promise<void> {
-    await this.db().collection<BrowserApp>('browser_apps').updateOne({ id: appId }, { $set: { sourceRevision, updatedAt: new Date().toISOString() } });
+  async restoreSourceRevision(appId: string, sourceRevision: number, generatedFromSpecRevision?: number): Promise<void> {
+    await this.db().collection<BrowserApp>('browser_apps').updateOne(
+      { id: appId },
+      { $set: {
+        sourceRevision,
+        ...(generatedFromSpecRevision === undefined ? {} : { generatedFromSpecRevision }),
+        updatedAt: new Date().toISOString(),
+      } },
+    );
+  }
+
+  async restoreGraphRevisions(
+    appId: string,
+    revisions: Pick<BrowserApp, 'sourceRevision' | 'schemaRevision' | 'policyRevision' | 'connectorRevision' | 'generatedFromSpecRevision'> & {
+      generationProfile?: BrowserGenerationProfile;
+    },
+  ): Promise<void> {
+    const { generationProfile, ...pointers } = revisions;
+    await this.db().collection<BrowserApp>('browser_apps').updateOne(
+      { id: appId },
+      {
+        $set: { ...pointers, ...(generationProfile ? { generationProfile } : {}), updatedAt: new Date().toISOString() },
+        ...(generationProfile ? {} : { $unset: { generationProfile: '' } }),
+      },
+    );
   }
 
   runtimeStyles(): string {
@@ -622,8 +965,24 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
     await Promise.all([
       this.db().collection<BrowserApp>('browser_apps').createIndex({ publicKey: 1 }, { unique: true }),
       this.db().collection<BrowserApp>('browser_apps').createIndex({ id: 1 }, { unique: true }),
+      this.db().collection<PlatformOrganization>('platform_organizations').createIndex({ id: 1 }, { unique: true }),
+      this.db().collection<PlatformOrganization>('platform_organizations').createIndex({ slug: 1 }, { unique: true }),
+      this.db().collection<PlatformMembership>('platform_memberships').createIndex({ platformOrganizationId: 1, subject: 1 }, { unique: true }),
+      this.db().collection<PlatformMembership>('platform_memberships').createIndex({ subject: 1, status: 1 }),
+      this.db().collection<PlatformRoleAssignment>('platform_role_assignments').createIndex({ subject: 1, role: 1 }, { unique: true }),
+      this.db().collection('platform_principals').createIndex({ subject: 1 }, { unique: true }),
+      this.db().collection('platform_principals').createIndex({ emailNormalized: 1 }, { unique: true }),
+      this.db().collection('platform_external_identities').createIndex({ connectorId: 1, providerSubject: 1 }, { unique: true }),
+      this.db().collection('platform_connector_configs').createIndex({ id: 1 }, { unique: true }),
+      this.db().collection('platform_connector_configs').createIndex({ platformOrganizationId: 1, name: 1 }, { unique: true }),
+      this.db().collection('platform_connector_configs').createIndex({ platformOrganizationId: 1, isLoginProvider: 1 }),
+      this.db().collection('platform_local_credentials').createIndex({ platformOrganizationId: 1, emailNormalized: 1 }, { unique: true }),
+      this.db().collection('platform_oauth_tokens').createIndex({ keyHash: 1 }, { unique: true }),
+      this.db().collection('platform_oauth_login_states').createIndex({ state: 1 }, { unique: true }),
+      this.db().collection('platform_oauth_login_states').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
       this.db().collection<BrowserAppSpecification>('app_specifications').createIndex({ appId: 1, revision: 1 }, { unique: true }),
       this.db().collection<AppModuleRecord>('app_modules').createIndex({ appId: 1, revision: 1, id: 1 }, { unique: true }),
+      this.db().collection<BrowserAgentRecord>('app_agents').createIndex({ appId: 1, revision: 1, id: 1 }, { unique: true }),
       this.db().collection<RouteDefinition>('app_routes').createIndex({ appId: 1, revision: 1, path: 1 }, { unique: true }),
       this.db().collection<RouteBinding>('route_bindings').createIndex({ hostname: 1, pathPrefix: 1 }, { unique: true }),
       this.db().collection<AppBuild>('app_builds').createIndex({ appId: 1, createdAt: -1 }),
@@ -646,6 +1005,7 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
   }
 
   private async ensureSeed(): Promise<void> {
+    await this.ensureControlPlaneSeed();
     if (await this.findApp(seedBrowserApp.id)) return;
     if (process.env.NODE_ENV === 'production' && process.env.SEED_BROWSER_DEMO !== 'true') return;
     await Promise.all([
@@ -656,6 +1016,7 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
       this.db().collection<DataSchemaRecord>('app_schemas').insertMany(seedSchemas),
       this.db().collection<EntityPolicyRecord>('app_policies').insertMany(seedPolicies),
       this.db().collection<ConnectorActionRecord>('app_connectors').insertMany(seedConnectors),
+      this.db().collection<BrowserAgentRecord>('app_agents').insertMany(seedAgents),
       this.db().collection<RouteBinding>('route_bindings').insertMany(seedBindings),
       this.db().collection<ThemeRevision>('app_themes').insertOne(seedTheme),
       this.db().collection<TenancyRevision>('app_tenancy_revisions').insertOne(seedTenancy),
@@ -666,8 +1027,38 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
     await this.migrateEntityTenancy(seedBrowserApp.id, seedTenancy.mode, seedEndTenants[0]!.id);
   }
 
+  private async ensureControlPlaneSeed(): Promise<void> {
+    const now = new Date().toISOString();
+    await this.db().collection<PlatformOrganization>('platform_organizations').updateOne(
+      { id: 'everworker-labs' },
+      { $setOnInsert: { id: 'everworker-labs', slug: 'everworker-labs', name: 'Everworker Labs', status: 'active', createdAt: now, updatedAt: now } },
+      { upsert: true },
+    );
+    await this.db().collection<PlatformMembership>('platform_memberships').updateOne(
+      { platformOrganizationId: 'everworker-labs', subject: 'local-superadmin' },
+      { $setOnInsert: {
+        id: randomUUID(), platformOrganizationId: 'everworker-labs', subject: 'local-superadmin', email: 'local-superadmin@local.onering.dev',
+        displayName: 'Local superadmin', role: 'owner', status: 'active', version: 1, createdAt: now, updatedAt: now,
+      } },
+      { upsert: true },
+    );
+    await this.db().collection<PlatformRoleAssignment>('platform_role_assignments').updateOne(
+      { subject: 'local-superadmin', role: 'platform_root' },
+      { $setOnInsert: { id: randomUUID(), subject: 'local-superadmin', role: 'platform_root', status: 'active', createdAt: now } },
+      { upsert: true },
+    );
+  }
+
   private async runMigrations(): Promise<void> {
     const migrations = this.db().collection<{ id: string; appliedAt: string }>('platform_migrations');
+    if (!(await migrations.findOne({ id: 'platform-organization-ownership-v1' }))) {
+      const apps = await this.db().collection('browser_apps').find({ platformOrganizationId: { $exists: false } }).toArray();
+      for (const app of apps) {
+        const legacyOwner = typeof app.ownerOrganizationId === 'string' ? app.ownerOrganizationId : 'everworker-labs';
+        await this.db().collection('browser_apps').updateOne({ _id: app._id }, { $set: { platformOrganizationId: legacyOwner }, $unset: { ownerOrganizationId: '' } });
+      }
+      await migrations.insertOne({ id: 'platform-organization-ownership-v1', appliedAt: new Date().toISOString() });
+    }
     if (!(await migrations.findOne({ id: 'browser-specification-v1' }))) {
       const apps = await this.db().collection<BrowserApp>('browser_apps').find().toArray();
       for (const app of apps) {
@@ -676,7 +1067,16 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
         if (!(await this.db().collection<BrowserAppSpecification>('app_specifications').findOne({ appId: app.id, revision: specRevision }))) {
           const specification: BrowserAppSpecification = app.id === seedBrowserApp.id
             ? { ...structuredClone(seedBrowserAppSpecification), appId: app.id, projectId, revision: specRevision }
-            : { id: randomUUID(), appId: app.id, projectId, revision: specRevision, status: 'approved', sections: [{ id: 'goal', title: 'Product goal', body: app.description }], createdAt: new Date().toISOString() };
+            : {
+                id: randomUUID(), appId: app.id, projectId, revision: specRevision, status: 'approved',
+                sections: [{ id: 'goal', title: 'Product goal', body: app.description }],
+                structure: {
+                  ...structuredClone(seedBrowserAppSpecification.structure), purpose: app.description, audience: app.tenancyMode,
+                  acceptanceCriteria: [{ id: 'accept-goal', requirementId: 'goal', description: app.description, kind: 'journey' }],
+                  pages: seedBrowserAppSpecification.structure.pages.map((page) => ({ ...page, acceptanceCriterionIds: ['accept-goal'] })),
+                },
+                createdAt: new Date().toISOString(),
+              };
           await this.db().collection<BrowserAppSpecification>('app_specifications').insertOne(specification);
         }
         await this.db().collection<BrowserApp>('browser_apps').updateOne({ id: app.id }, { $set: { projectId, specRevision } });
@@ -717,6 +1117,57 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
         }
       }
       await migrations.insertOne({ id: 'browser-record-version-v3', appliedAt: new Date().toISOString() });
+    }
+    if (!(await migrations.findOne({ id: 'browser-authoritative-spec-v4' }))) {
+      const apps = await this.db().collection<BrowserApp>('browser_apps').find().toArray();
+      for (const app of apps) {
+        const specification = await this.db().collection<BrowserAppSpecification>('app_specifications').findOne({ appId: app.id, revision: app.specRevision });
+        const [modules, routes, schemas, policies, connectors] = await Promise.all([
+          this.modules(app.id, app.sourceRevision), this.routes(app.id, app.sourceRevision), this.schemas(app.id, app.schemaRevision),
+          this.policies(app.id, app.policyRevision), this.connectors(app.id, app.connectorRevision),
+        ]);
+        const requirementIds = specification?.sections.map((section) => section.id) ?? ['goal'];
+        await Promise.all([
+          this.db().collection<BrowserApp>('browser_apps').updateOne({ id: app.id }, { $set: { generatedFromSpecRevision: app.generatedFromSpecRevision ?? app.specRevision } }),
+          this.db().collection<AppModuleRecord>('app_modules').updateMany({ appId: app.id, requirementIds: { $exists: false } }, { $set: { requirementIds } }),
+          this.db().collection<RouteDefinition>('app_routes').updateMany({ appId: app.id, requirementIds: { $exists: false } }, { $set: { requirementIds } }),
+          this.db().collection<DataSchemaRecord>('app_schemas').updateMany({ appId: app.id, requirementIds: { $exists: false } }, { $set: { requirementIds } }),
+          this.db().collection<EntityPolicyRecord>('app_policies').updateMany({ appId: app.id, requirementIds: { $exists: false } }, { $set: { requirementIds } }),
+          this.db().collection<ConnectorActionRecord>('app_connectors').updateMany({ appId: app.id, requirementIds: { $exists: false } }, { $set: { requirementIds } }),
+        ]);
+        for (const route of routes) if (!route.specPageId) {
+          const specPageId = app.id === seedBrowserApp.id
+            ? seedRoutes.find((candidate) => candidate.path === route.path)?.specPageId ?? `page-${route.id}`
+            : `page-${route.id}`;
+          await this.db().collection<RouteDefinition>('app_routes').updateOne({ appId: app.id, revision: route.revision, id: route.id }, { $set: { specPageId } });
+          route.specPageId = specPageId;
+        }
+        if (specification && !specification.structure) {
+          const structure: AppStructuredSpecification = app.id === seedBrowserApp.id ? structuredClone(seedBrowserAppSpecification.structure) : {
+            purpose: specification.sections[0]?.body ?? app.description,
+            audience: app.tenancyMode,
+            roles: ['public', 'viewer', 'editor', 'admin'].map((id) => ({ id, name: id[0]!.toUpperCase() + id.slice(1), description: `${id} application role.` })),
+            pages: routes.map((route) => ({ id: `page-${route.id}`, name: modules.find((module) => module.id === route.pageModuleId)?.name ?? route.id, path: route.path, purpose: modules.find((module) => module.id === route.pageModuleId)?.description ?? 'Application page.', public: route.public, roleIds: ['public', 'viewer', 'editor', 'admin'], states: ['loading', 'empty', 'error', 'forbidden', 'ready'] as AppStructuredSpecification['pages'][number]['states'], entityIds: schemas.map((schema) => schema.entity), workflowIds: [], agentIds: [], acceptanceCriterionIds: [] })),
+            entities: schemas.map((schema) => ({ id: schema.entity, name: schema.displayName, description: `${schema.displayName} application data.`, fields: Object.entries((schema.jsonSchema.properties ?? {}) as Record<string, Record<string, unknown>>).map(([id, value]) => ({ id, type: (typeof value.type === 'string' && ['string', 'number', 'boolean', 'object', 'array'].includes(value.type) ? value.type : value.enum ? 'enum' : 'string') as AppStructuredSpecification['entities'][number]['fields'][number]['type'], required: Array.isArray(schema.jsonSchema.required) && schema.jsonSchema.required.includes(id), description: `${schema.displayName} ${id}.` })) })),
+            workflows: [], agents: [],
+            acceptanceCriteria: specification.sections.map((section) => ({ id: `accept-${section.id}`, requirementId: section.id, description: section.body, kind: 'journey' as const })),
+          };
+          await this.db().collection<BrowserAppSpecification>('app_specifications').updateOne({ _id: specification._id }, { $set: { structure } });
+        }
+        if (!(await this.db().collection<BrowserAgentRecord>('app_agents').findOne({ appId: app.id, revision: app.sourceRevision }))) {
+          const agents = seedAgents.map((agent) => ({ ...structuredClone(agent), appId: app.id, revision: app.sourceRevision }));
+          if (agents.length) await this.db().collection<BrowserAgentRecord>('app_agents').insertMany(agents);
+        }
+        await this.db().collection<AppBuild>('app_builds').updateMany(
+          { appId: app.id, specRevision: { $exists: false } },
+          { $set: { specRevision: app.specRevision, acceptance: { total: requirementIds.length, covered: 0, requirementIds: [] } } },
+        );
+        await this.db().collection<BrowserRelease>('browser_releases').updateMany(
+          { appId: app.id, environment: { $exists: false } },
+          { $set: { specRevision: app.specRevision, environment: 'production', generatorVersion: 'legacy-v1' } },
+        );
+      }
+      await migrations.insertOne({ id: 'browser-authoritative-spec-v4', appliedAt: new Date().toISOString() });
     }
   }
 }

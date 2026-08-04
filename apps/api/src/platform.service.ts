@@ -18,9 +18,15 @@ export class PlatformService {
     @Inject(AiService) private readonly ai: AiService,
   ) {}
 
-  bootstrap() {
+  bootstrap(includeBuilderSystem = false) {
     const state = this.store.snapshot();
-    return { ...state, connectors: this.connectors(), aiAvailable: this.ai.available() };
+    return {
+      ...state,
+      agents: includeBuilderSystem ? state.agents : [],
+      builderVersion: includeBuilderSystem ? state.builderVersion : '',
+      connectors: this.connectors(),
+      aiAvailable: this.ai.available(),
+    };
   }
 
   project(id: string): Project {
@@ -84,6 +90,9 @@ export class PlatformService {
   }
 
   updateAgent(id: string, patch: Partial<BuilderAgent>): BuilderAgent {
+    if (patch.effort && !['low', 'medium', 'high'].includes(patch.effort)) {
+      throw new BadRequestException('Builder-agent effort must be low, medium, or high');
+    }
     let updated: BuilderAgent | undefined;
     this.store.mutate((state) => {
       const agent = state.agents.find((candidate) => candidate.id === id);

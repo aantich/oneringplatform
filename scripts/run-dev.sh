@@ -17,5 +17,6 @@ if [ -z "${MONGO_URI:-}" ]; then
   MONGO_URI="mongodb://${encoded_user}:${encoded_password}@127.0.0.1:27017/oneringplatform?authSource=admin&directConnection=true"
 fi
 
-export MONGO_URI
+LOCAL_DEV_AUTH="${LOCAL_DEV_AUTH:-1}"
+export MONGO_URI LOCAL_DEV_AUTH
 exec npm run dev:direct

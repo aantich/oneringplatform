@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type {
   AppModuleRecord,
   AppMembership,
+  BrowserAgentRecord,
   BrowserApp,
   BrowserAppSpecification,
   ConnectorActionRecord,
@@ -19,7 +20,7 @@ const now = new Date().toISOString();
 const appId = 'pulse-tasks';
 
 const taskPageSource = `import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { api, bootstrap, setDemoRole } from 'app:runtime';
+	import { api, bootstrap, runAgent, setDemoRole } from 'app:runtime';
 
 type Role = 'public' | 'viewer' | 'editor' | 'admin';
 type Task = { id: string; title: string; description?: string; status: 'todo' | 'doing' | 'done'; visibility: 'public' | 'members'; version: number; createdAt: string };
@@ -78,8 +79,8 @@ export default function TaskBoard() {
   async function suggest() {
     setBusy(true);
     try {
-      const result = await api('/connectors/idea-assistant/actions/suggest', { method: 'POST', body: JSON.stringify({ context: 'A practical next task for a small product team' }) }) as { suggestion: string };
-      setIdea(result.suggestion);
+      const result = await runAgent('task-planner', 'Suggest a practical next task for this small product team.') as { output: string };
+      setIdea(result.output);
     } finally { setBusy(false); }
   }
 
@@ -123,7 +124,7 @@ export const runtimeCss = `:root{font-family:Inter,ui-sans-serif,system-ui,-appl
 function module(id: string, kind: AppModuleRecord['kind'], name: string, description: string, source: string): AppModuleRecord {
   return {
     id, appId, revision: 1, kind, name, description, source,
-    dependencies: [], packageImports: ['react'], requiredCapabilities: [],
+    dependencies: [], packageImports: ['react'], requiredCapabilities: [], requirementIds: ['goal', 'experience'],
     contentHash: createHash('sha256').update(source).digest('hex'), createdAt: now,
   };
 }
@@ -131,12 +132,13 @@ function module(id: string, kind: AppModuleRecord['kind'], name: string, descrip
 export const seedBrowserApp: BrowserApp = {
   id: appId,
   publicKey: appId,
-  ownerOrganizationId: 'everworker-labs',
+  platformOrganizationId: 'everworker-labs',
   name: 'Pulse Tasks',
   description: 'A browser-native team task application generated from a living PRD.',
   runtimeProfile: 'browser_data',
   projectId: 'fieldops-ai',
   specRevision: 13,
+  generatedFromSpecRevision: 13,
   sourceRevision: 1,
   schemaRevision: 1,
   policyRevision: 1,
@@ -155,6 +157,37 @@ export const seedBrowserAppSpecification: BrowserAppSpecification = {
     { id: 'security', title: 'Security boundary', body: 'All private records are scoped by verified app and organization membership; browser code never supplies authoritative tenant scope.' },
     { id: 'experience', title: 'Experience', body: 'Provide responsive task, architecture, identity, connector and exception states with accessible visual hierarchy.' },
   ],
+  structure: {
+    purpose: 'Help operations teams coordinate role-aware work through a secure browser-native task workspace.',
+    audience: 'multi_organization',
+    roles: [
+      { id: 'public', name: 'Public visitor', description: 'Can read explicitly public records.' },
+      { id: 'viewer', name: 'Viewer', description: 'Can read organization records.' },
+      { id: 'editor', name: 'Editor', description: 'Can create and update organization records.' },
+      { id: 'admin', name: 'Administrator', description: 'Can manage all organization records.' },
+    ],
+    pages: [
+      { id: 'page-task-board', name: 'Task board', path: '/', purpose: 'Coordinate role-aware team tasks.', public: true, roleIds: ['public', 'viewer', 'editor', 'admin'], states: ['loading', 'empty', 'error', 'forbidden', 'ready'], entityIds: ['tasks'], workflowIds: ['workflow-task-lifecycle'], agentIds: ['task-planner'], acceptanceCriterionIds: ['accept-task-isolation', 'accept-agent-plan'] },
+      { id: 'page-about', name: 'Architecture', path: '/about', purpose: 'Explain the application trust boundary.', public: true, roleIds: ['public', 'viewer', 'editor', 'admin'], states: ['ready'], entityIds: [], workflowIds: [], agentIds: [], acceptanceCriterionIds: [] },
+    ],
+    entities: [{ id: 'tasks', name: 'Task', description: 'An organization-scoped unit of work.', fields: [
+      { id: 'title', type: 'string', required: true, description: 'Short task title.' },
+      { id: 'description', type: 'string', required: false, description: 'Optional task detail.' },
+      { id: 'status', type: 'enum', required: true, description: 'Current workflow state.' },
+      { id: 'visibility', type: 'enum', required: true, description: 'Public or member visibility.' },
+    ] }],
+    workflows: [{ id: 'workflow-task-lifecycle', name: 'Task lifecycle', description: 'Create, advance, and complete team work.', trigger: 'A member creates or updates a task.', steps: [
+      { id: 'load', type: 'data_read', description: 'Load visible tasks.' },
+      { id: 'mutate', type: 'data_write', description: 'Apply an authorized task mutation.' },
+      { id: 'suggest', type: 'agent', description: 'Ask the browser-owned planning agent for a next task.' },
+    ] }],
+    agents: [{ id: 'task-planner', name: 'Task planner', purpose: 'Suggest one useful next task.', connector: 'openai-main', model: 'gpt-5.4-mini', toolIds: ['idea-assistant:suggest'], maximumIterations: 4, humanApprovalRequired: false }],
+    acceptanceCriteria: [
+      { id: 'accept-task-isolation', requirementId: 'security', description: 'Members cannot read or mutate another organization’s private tasks.', kind: 'policy' },
+      { id: 'accept-agent-plan', requirementId: 'goal', description: 'An authenticated member can obtain a validated next-task suggestion.', kind: 'agent' },
+      { id: 'accept-accessibility', requirementId: 'experience', description: 'Published themes pass managed contrast requirements.', kind: 'accessibility' },
+    ],
+  },
 };
 
 export const seedModules = [
@@ -163,8 +196,8 @@ export const seedModules = [
 ];
 
 export const seedRoutes: RouteDefinition[] = [
-  { id: 'route-home', appId, revision: 1, path: '/', pageModuleId: 'task-board-page', public: true, requiredCapabilities: [], navigation: { label: 'Tasks', order: 1 } },
-  { id: 'route-about', appId, revision: 1, path: '/about', pageModuleId: 'about-page', public: true, requiredCapabilities: [], navigation: { label: 'Architecture', order: 2 } },
+  { id: 'route-home', appId, revision: 1, path: '/', specPageId: 'page-task-board', pageModuleId: 'task-board-page', public: true, requiredCapabilities: [], requirementIds: ['goal', 'security', 'experience'], navigation: { label: 'Tasks', order: 1 } },
+  { id: 'route-about', appId, revision: 1, path: '/about', specPageId: 'page-about', pageModuleId: 'about-page', public: true, requiredCapabilities: [], requirementIds: ['experience'], navigation: { label: 'Architecture', order: 2 } },
 ];
 
 export const seedSchemas: DataSchemaRecord[] = [{
@@ -180,7 +213,7 @@ export const seedSchemas: DataSchemaRecord[] = [{
     },
   },
   indexes: [{ fields: { status: 1, createdAt: -1 } }, { fields: { visibility: 1, createdAt: -1 } }],
-  publicRecordFilter: { visibility: 'public' },
+  publicRecordFilter: { visibility: 'public' }, requirementIds: ['security'],
 }];
 
 export const seedPolicies: EntityPolicyRecord[] = [{
@@ -190,7 +223,7 @@ export const seedPolicies: EntityPolicyRecord[] = [{
     viewer: { operations: ['read'], readFields: ['id', 'title', 'description', 'status', 'visibility', 'version', 'createdAt', 'updatedAt'], writeFields: [], uiCapabilities: ['tasks:read'] },
     editor: { operations: ['create', 'read', 'update'], readFields: ['id', 'title', 'description', 'status', 'visibility', 'version', 'createdAt', 'updatedAt'], writeFields: ['title', 'description', 'status', 'visibility'], uiCapabilities: ['tasks:read', 'tasks:create', 'tasks:update'] },
     admin: { operations: ['create', 'read', 'update', 'delete'], readFields: ['id', 'title', 'description', 'status', 'visibility', 'version', 'createdAt', 'updatedAt'], writeFields: ['title', 'description', 'status', 'visibility'], uiCapabilities: ['tasks:read', 'tasks:create', 'tasks:update', 'tasks:delete'] },
-  },
+  }, requirementIds: ['security'],
 }];
 
 export const seedConnectors: ConnectorActionRecord[] = [{
@@ -198,7 +231,16 @@ export const seedConnectors: ConnectorActionRecord[] = [{
   description: 'Suggest a concise next task from user-provided context.', allowedRoles: ['viewer', 'editor', 'admin'],
   inputSchema: { type: 'object', additionalProperties: false, required: ['context'], properties: { context: { type: 'string', minLength: 3, maxLength: 500 } } },
   outputSchema: { type: 'object', additionalProperties: false, required: ['suggestion', 'connector', 'action'], properties: { suggestion: { type: 'string', maxLength: 4000 }, connector: { type: 'string' }, action: { type: 'string' } } },
-  timeoutMs: 20_000, rateLimitPerMinute: 10,
+  timeoutMs: 20_000, rateLimitPerMinute: 10, requirementIds: ['goal', 'security'],
+}];
+
+export const seedAgents: BrowserAgentRecord[] = [{
+  id: 'task-planner', appId, revision: 1, name: 'Task planner',
+  description: 'A browser-orchestrated agent that proposes one useful next task.',
+  connector: 'openai-main', model: 'gpt-5.4-mini',
+  instructions: 'Help the user decide one practical next task. You may request the idea-assistant:suggest tool when useful. Return concise, actionable guidance.',
+  allowedRoles: ['viewer', 'editor', 'admin'], toolIds: ['idea-assistant:suggest'], maximumIterations: 4,
+  humanApprovalRequired: false, requirementIds: ['goal', 'security'],
 }];
 
 export const seedBindings: RouteBinding[] = [
