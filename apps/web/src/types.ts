@@ -210,13 +210,59 @@ export interface BrowserRoute {
   navigation?: { label: string; order: number };
 }
 
+export type ApplicationType = 'browser_data' | 'full_stack' | 'api_service' | 'mobile' | 'workflow_automation';
+export interface ApplicationProfile {
+  applicationType: ApplicationType;
+  tenancyMode: AppTenancyMode;
+  identityMode: 'private' | 'public_and_authenticated' | 'organization_sso';
+  agenticLevel: 'none' | 'assistive' | 'tool_using';
+  dataSensitivity: 'standard' | 'confidential' | 'regulated';
+  execution: { browser: boolean; server: boolean; backgroundJobs: boolean; schedules: boolean; webhooks: boolean };
+  deploymentTarget: 'managed_platform';
+}
+
+export interface ApplicationGeneratorManifest {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  supportedApplicationTypes: ApplicationType[];
+  available: boolean;
+  capabilities: string[];
+}
+
+export interface ApplicationDiscoverySession {
+  id: string;
+  appId: string;
+  status: 'idle' | 'running' | 'failed';
+  progress: number;
+  phase: string;
+  baseSpecRevision: number;
+  currentSpecRevision: number;
+  messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; createdAt: string }>;
+  events: Array<{ id: string; sequence: number; type: 'status' | 'thinking' | 'tool' | 'specification' | 'result' | 'warning' | 'error'; actor: string; title: string; detail?: string; durationMs?: number; metadata?: Record<string, string | number | boolean>; createdAt: string }>;
+  draft?: {
+    baseSpecRevision: number;
+    sections: BrowserAppDetail['specification']['sections'];
+    structure: AppStructuredSpecification;
+    changes: Array<{ tool: string; targetId: string; summary: string }>;
+    updatedAt: string;
+  };
+  coverage: { score: number; covered: string[]; missing: string[]; contradictions: string[] };
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface BrowserAppSummary {
   id: string;
   publicKey: string;
   platformOrganizationId: string;
   name: string;
   description: string;
-  runtimeProfile: 'browser_data';
+  runtimeProfile: 'browser_data' | 'specification_only';
+  profile: ApplicationProfile;
+  generatorId?: string;
   projectId: string;
   specRevision: number;
   generatedFromSpecRevision: number;
@@ -230,11 +276,49 @@ export interface BrowserAppSummary {
   activeReleaseId?: string;
   previewReleaseId?: string;
   generationProfile?: BrowserGenerationProfile;
+  lifecycleStatus: 'draft' | 'specifying' | 'generating' | 'preview_ready' | 'generation_failed' | 'production';
+  specificationApprovalStatus: 'draft' | 'approved';
   moduleCount: number;
   routeCount: number;
   entityCount: number;
   url: string;
   release?: { id: string; version: string; status: string; createdAt: string };
+}
+
+export interface BrowserGenerationEvent {
+  id: string;
+  sequence: number;
+  type: 'status' | 'thinking' | 'tool' | 'model' | 'result' | 'warning' | 'error';
+  actor: string;
+  title: string;
+  detail?: string;
+  createdAt: string;
+  durationMs?: number;
+  metadata?: Record<string, string | number | boolean>;
+}
+
+export interface BrowserGenerationJob {
+  id: string;
+  appId: string;
+  specRevision: number;
+  instruction: string;
+  generationProfile: BrowserGenerationProfile;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  phase: string;
+  progress: number;
+  workers: Array<{
+    templateId: string; name: string; role: string; connector: string; model: string; effort: GenerationEffort;
+    status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+    startedAt?: string; completedAt?: string; durationMs?: number; error?: string;
+    metrics?: { inputTokens: number; outputTokens: number; reasoningTokens: number; toolCalls: number };
+  }>;
+  events: BrowserGenerationEvent[];
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  error?: string;
+  result?: { sourceRevision: number; previewReleaseId: string; previewVersion: string; buildId: string };
 }
 
 export interface BrowserAppDetail {
@@ -260,11 +344,17 @@ export interface BrowserAppDetail {
 export interface AppStructuredSpecification {
   purpose: string;
   audience: AppTenancyMode;
+  personas: Array<{ id: string; name: string; description: string; goals: string[]; painPoints: string[]; roleIds: string[] }>;
+  userStories: Array<{ id: string; title: string; personaId?: string; statement: string; priority: 'must' | 'should' | 'could'; surfaceIds: string[]; workflowIds: string[]; acceptanceCriterionIds: string[] }>;
   roles: Array<{ id: string; name: string; description: string }>;
   pages: Array<{ id: string; name: string; path: string; purpose: string; public: boolean; roleIds: string[]; states: Array<'loading' | 'empty' | 'error' | 'forbidden' | 'ready'>; entityIds: string[]; workflowIds: string[]; agentIds: string[]; acceptanceCriterionIds: string[] }>;
   entities: Array<{ id: string; name: string; description: string; fields: Array<{ id: string; type: string; required: boolean; description: string }> }>;
   workflows: Array<{ id: string; name: string; description: string; trigger: string; steps: Array<{ id: string; type: string; description: string }> }>;
   agents: Array<{ id: string; name: string; purpose: string; connector: string; model: string; toolIds: string[]; maximumIterations: number; humanApprovalRequired: boolean }>;
+  integrations: Array<{ id: string; name: string; purpose: string; connector?: string; operations: string[]; failureBehavior: string; dataClassification: 'standard' | 'confidential' | 'regulated' }>;
+  decisions: Array<{ id: string; title: string; decision: string; rationale: string; status: 'proposed' | 'confirmed' | 'rejected'; sourceMessageIds: string[] }>;
+  qualityAttributes: Array<{ id: string; category: 'accessibility' | 'performance' | 'reliability' | 'security' | 'privacy' | 'operability'; requirement: string; measure: string }>;
+  designBrief: { tone: string; principles: string[]; accessibilityTarget: 'AA' | 'AAA' };
   acceptanceCriteria: Array<{ id: string; requirementId: string; description: string; kind: 'journey' | 'policy' | 'data' | 'agent' | 'accessibility' }>;
 }
 

@@ -1,7 +1,7 @@
-import type { AppTenancyMode, BootstrapData, BrowserAppDetail, BrowserAppSummary, BrowserGenerationAgentConfiguration, BrowserGenerationOptions, BrowserGenerationProfile, BuilderAgent, ConnectorTemplate, ControlPlaneSession, OrganizationConnectorSummary, OrganizationLoginConfiguration, PlatformOrganization, Project, Release, SpecArtifact, ThemeRevision, ThemeStarter } from './types';
+import type { AppTenancyMode, ApplicationDiscoverySession, ApplicationGeneratorManifest, ApplicationProfile, BootstrapData, BrowserAppDetail, BrowserAppSummary, BrowserGenerationJob, BrowserGenerationOptions, BrowserGenerationProfile, BuilderAgent, ConnectorTemplate, ControlPlaneSession, OrganizationConnectorSummary, OrganizationLoginConfiguration, PlatformOrganization, Project, Release, SpecArtifact, ThemeRevision, ThemeStarter } from './types';
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(message: string, readonly status: number, readonly details?: unknown) {
     super(message);
   }
 }
@@ -19,7 +19,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new ApiError(body.message ?? `Request failed (${response.status})`, response.status);
+    const message = typeof body.message === 'string' ? body.message : `Request failed (${response.status})`;
+    throw new ApiError(message, response.status, body.issues ?? body.errors ?? body);
   }
   return response.json() as Promise<T>;
 }
@@ -66,19 +67,29 @@ export const api = {
   promote: (releaseId: string) =>
     request<Release>(`/releases/${releaseId}/promote`, { method: 'POST' }),
   browserApps: () => request<BrowserAppSummary[]>('/browser-apps'),
-  createBrowserApp: (input: { name: string; description: string; mode: AppTenancyMode }) =>
+  createBrowserApp: (input: { name: string; description: string; mode: AppTenancyMode; profile?: ApplicationProfile }) =>
     request<{ detail: BrowserAppDetail }>('/browser-apps', { method: 'POST', body: JSON.stringify(input) }),
   browserApp: (appId: string) => request<BrowserAppDetail>(`/browser-apps/${appId}`),
   browserGenerationOptions: () => request<BrowserGenerationOptions>('/browser-apps/generation-options'),
+  applicationGenerators: () => request<ApplicationGeneratorManifest[]>('/browser-apps/generators'),
+  applicationDiscovery: (appId: string) => request<ApplicationDiscoverySession>(`/browser-apps/${appId}/discovery`),
+  startApplicationDiscovery: (appId: string, content: string, configuration?: { connector?: string; model?: string; effort?: 'low' | 'medium' | 'high' }) =>
+    request<ApplicationDiscoverySession>(`/browser-apps/${appId}/discovery/messages`, { method: 'POST', body: JSON.stringify({ content, configuration }) }),
+  cancelApplicationDiscovery: (appId: string) => request<ApplicationDiscoverySession>(`/browser-apps/${appId}/discovery/cancel`, { method: 'POST' }),
   reviseBrowserAppSpecification: (appId: string, expectedRevision: number, sections: BrowserAppDetail['specification']['sections'], structure: BrowserAppDetail['specification']['structure']) =>
     request<{ detail: BrowserAppDetail }>(`/browser-apps/${appId}/specification`, {
       method: 'PATCH', body: JSON.stringify({ expectedRevision, sections, structure }),
     }),
+  approveBrowserAppSpecification: (appId: string) => request<{ detail: BrowserAppDetail }>(`/browser-apps/${appId}/specification/approve`, { method: 'POST' }),
   generateBrowserApp: (appId: string, instruction: string, generationProfile: BrowserGenerationProfile) =>
-    request<{ plan: { accent: string; headline: string; agent: string; workers: Array<BrowserGenerationAgentConfiguration & { agent: string }> }; attempts: number; failures: string[]; detail: BrowserAppDetail }>(`/browser-apps/${appId}/generate`, {
+    request<BrowserGenerationJob>(`/browser-apps/${appId}/generate`, {
       method: 'POST',
       body: JSON.stringify({ instruction, generationProfile }),
     }),
+  latestBrowserGenerationJob: async (appId: string) =>
+    (await request<{ job: BrowserGenerationJob | null }>(`/browser-apps/${appId}/generation-jobs/latest`)).job,
+  browserGenerationJob: (appId: string, jobId: string) => request<BrowserGenerationJob>(`/browser-apps/${appId}/generation-jobs/${jobId}`),
+  cancelBrowserGenerationJob: (appId: string, jobId: string) => request<BrowserGenerationJob>(`/browser-apps/${appId}/generation-jobs/${jobId}/cancel`, { method: 'POST' }),
   buildBrowserApp: (appId: string) =>
     request<{ detail: BrowserAppDetail }>(`/browser-apps/${appId}/build`, { method: 'POST' }),
   promoteBrowserAppRelease: (appId: string, releaseId: string) =>
@@ -115,5 +126,5 @@ export const api = {
   generateTheme: (appId: string, direction: string) =>
     request<{ theme: ThemeRevision; agent: 'oneringai' | 'fallback' }>(`/browser-apps/${appId}/themes/generate`, { method: 'POST', body: JSON.stringify({ direction }) }),
   publishTheme: (appId: string, revision: number) =>
-    request<{ theme: ThemeRevision; detail: BrowserAppDetail }>(`/browser-apps/${appId}/themes/${revision}/publish`, { method: 'POST' }),
+    request<{ theme: ThemeRevision; publication: { release: { id: string; version: string } }; detail: BrowserAppDetail }>(`/browser-apps/${appId}/themes/${revision}/publish`, { method: 'POST' }),
 };

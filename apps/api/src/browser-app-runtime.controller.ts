@@ -143,7 +143,7 @@ export class BrowserAppRuntimeController {
     if (!app || !active || !active.build.artifactFileId) return res.status(404).send('Application release not found');
     const title = this.escape(app.name);
     res.setHeader('content-type', 'text/html; charset=utf-8');
-    res.setHeader('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'; manifest-src 'none'");
+    res.setHeader('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'none'; worker-src 'none'; manifest-src 'none'");
     res.setHeader('x-content-type-options', 'nosniff');
     res.setHeader('referrer-policy', 'no-referrer');
     const previewContract = active.release.status === 'preview'

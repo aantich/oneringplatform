@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AiService } from './ai.service.js';
+import { ApplicationGeneratorRegistry } from './application-generator.registry.js';
+import { ApplicationDiscoveryService } from './application-discovery.service.js';
 import { BrowserAppBuildService } from './browser-app-build.service.js';
 import { BrowserAppController } from './browser-app.controller.js';
 import { BrowserAppRepository } from './browser-app.repository.js';
@@ -24,6 +26,8 @@ import { StoreService } from './store.service.js';
   providers: [
     StoreService,
     AiService,
+    ApplicationGeneratorRegistry,
+    ApplicationDiscoveryService,
     PlatformService,
     BrowserAppRepository,
     BrowserAppThemeCompilerService,

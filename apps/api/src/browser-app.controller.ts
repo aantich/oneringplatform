@@ -3,6 +3,7 @@ import type { Request } from 'express';
 import { BrowserAppService } from './browser-app.service.js';
 import { BrowserAppThemeService } from './browser-app-theme.service.js';
 import { BrowserAppTenancyService } from './browser-app-tenancy.service.js';
+import { ApplicationDiscoveryService } from './application-discovery.service.js';
 import { ControlPlaneAuthGuard, PublicControlPlane, RequirePermission, type ControlPlanePrincipal } from './control-plane-auth.guard.js';
 
 @Controller('browser-apps')
@@ -12,6 +13,7 @@ export class BrowserAppController {
     @Inject(BrowserAppService) private readonly browserApps: BrowserAppService,
     @Inject(BrowserAppThemeService) private readonly themes: BrowserAppThemeService,
     @Inject(BrowserAppTenancyService) private readonly tenancy: BrowserAppTenancyService,
+    @Inject(ApplicationDiscoveryService) private readonly discovery: ApplicationDiscoveryService,
   ) {}
 
   @Get()
@@ -23,7 +25,7 @@ export class BrowserAppController {
   @Post()
   @RequirePermission('app.create')
   create(
-    @Body() body: { name?: unknown; description?: unknown; mode?: unknown },
+    @Body() body: { name?: unknown; description?: unknown; mode?: unknown; profile?: unknown },
     @Req() req: Request & { controlPrincipal?: ControlPlanePrincipal },
   ) {
     return this.browserApps.create(body, req.controlPrincipal!);
@@ -47,16 +49,62 @@ export class BrowserAppController {
     return this.browserApps.generationOptions();
   }
 
+  @Get('generators')
+  @RequirePermission('app.read')
+  generators() {
+    return this.browserApps.generatorsList();
+  }
+
   @Get(':appId')
   @RequirePermission('app.read')
   detail(@Param('appId') appId: string) {
     return this.browserApps.detail(appId);
   }
 
+  @Get(':appId/discovery')
+  @RequirePermission('app.read')
+  discoverySession(@Param('appId') appId: string) {
+    return this.discovery.session(appId);
+  }
+
+  @Post(':appId/discovery/messages')
+  @RequirePermission('app.write')
+  startDiscovery(
+    @Param('appId') appId: string,
+    @Body() body: { content?: unknown; configuration?: { connector?: unknown; model?: unknown; effort?: unknown } },
+    @Req() req: Request & { controlPrincipal?: ControlPlanePrincipal },
+  ) {
+    return this.discovery.start(appId, body.content, req.controlPrincipal!, body.configuration);
+  }
+
+  @Post(':appId/discovery/cancel')
+  @RequirePermission('app.write')
+  cancelDiscovery(@Param('appId') appId: string) {
+    return this.discovery.cancel(appId);
+  }
+
   @Post(':appId/generate')
   @RequirePermission('app.write')
   generate(@Param('appId') appId: string, @Body() body: { instruction?: string; generationProfile?: unknown }) {
-    return this.browserApps.generate(appId, body.instruction, body.generationProfile);
+    return this.browserApps.startGeneration(appId, body.instruction, body.generationProfile);
+  }
+
+  @Get(':appId/generation-jobs/latest')
+  @RequirePermission('app.read')
+  async latestGeneration(@Param('appId') appId: string) {
+    return { job: await this.browserApps.latestGenerationJob(appId) };
+  }
+
+  @Get(':appId/generation-jobs/:jobId')
+  @RequirePermission('app.read')
+  generationJob(@Param('appId') appId: string, @Param('jobId') jobId: string) {
+    return this.browserApps.generationJob(appId, jobId);
+  }
+
+  @Post(':appId/generation-jobs/:jobId/cancel')
+  @RequirePermission('app.write')
+  cancelGeneration(@Param('appId') appId: string, @Param('jobId') jobId: string) {
+    return this.browserApps.cancelGeneration(appId, jobId);
   }
 
   @Patch(':appId/specification')
@@ -66,6 +114,12 @@ export class BrowserAppController {
     @Body() body: { expectedRevision?: unknown; sections?: unknown; structure?: unknown },
   ) {
     return this.browserApps.reviseSpecification(appId, body);
+  }
+
+  @Post(':appId/specification/approve')
+  @RequirePermission('app.write')
+  approveSpecification(@Param('appId') appId: string) {
+    return this.browserApps.approveSpecification(appId);
   }
 
   @Post(':appId/tenancy')

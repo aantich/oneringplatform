@@ -17,11 +17,16 @@ import type {
   AppGraphChangeSet,
   AppMembership,
   AppModuleRecord,
+  ApplicationDiscoveryDraft,
+  ApplicationDiscoveryEvent,
+  ApplicationDiscoverySession,
   AppStructuredSpecification,
   BrowserAgentRecord,
   BrowserApp,
   BrowserAppDetail,
   BrowserAppSpecification,
+  BrowserGenerationEvent,
+  BrowserGenerationJob,
   BrowserGenerationProfile,
   BrowserRelease,
   ConnectorActionRecord,
@@ -52,6 +57,7 @@ import {
   seedTasks,
 } from './browser-app.seed.js';
 import type { OrganizationRole, PlatformRole } from './control-plane-auth.guard.js';
+import { defaultApplicationProfile } from './application-profile.js';
 
 export type PlatformOrganization = {
   id: string;
@@ -120,6 +126,85 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
     return this.db().collection<BrowserApp>('browser_apps').find().sort({ updatedAt: -1 }).toArray();
   }
 
+  async createGenerationJob(job: BrowserGenerationJob): Promise<void> {
+    await this.db().collection<BrowserGenerationJob>('app_generation_jobs').insertOne(job);
+  }
+
+  generationJob(appId: string, jobId: string): Promise<BrowserGenerationJob | null> {
+    return this.db().collection<BrowserGenerationJob>('app_generation_jobs').findOne({ appId, id: jobId });
+  }
+
+  latestGenerationJob(appId: string): Promise<BrowserGenerationJob | null> {
+    return this.db().collection<BrowserGenerationJob>('app_generation_jobs').find({ appId }).sort({ createdAt: -1 }).limit(1).next();
+  }
+
+  async discoverySession(appId: string): Promise<ApplicationDiscoverySession> {
+    const collection = this.db().collection<ApplicationDiscoverySession>('application_discovery_sessions');
+    const withoutStorageId = (stored: ApplicationDiscoverySession & { _id?: unknown }): ApplicationDiscoverySession => {
+      const { _id: _storageId, ...session } = stored;
+      return session;
+    };
+    const existing = await collection.findOne({ appId });
+    if (existing) return withoutStorageId(existing);
+    const now = new Date().toISOString();
+    const app = await this.findApp(appId);
+    if (!app) throw new Error('Application not found');
+    const session: ApplicationDiscoverySession = {
+      id: randomUUID(), appId, status: 'idle', progress: 0, phase: 'ready', baseSpecRevision: app.specRevision,
+      currentSpecRevision: app.specRevision, messages: [], events: [],
+      coverage: { score: 0, covered: [], missing: ['Discovery interview'], contradictions: [] }, createdAt: now, updatedAt: now,
+    };
+    try { await collection.insertOne(session); } catch (error) {
+      if ((error as { code?: number }).code !== 11000) throw error;
+      return withoutStorageId((await collection.findOne({ appId }))!);
+    }
+    return session;
+  }
+
+  async saveDiscoverySession(session: ApplicationDiscoverySession): Promise<void> {
+    const { _id: _storedId, ...replacement } = session as ApplicationDiscoverySession & { _id?: unknown };
+    await this.db().collection<ApplicationDiscoverySession>('application_discovery_sessions').replaceOne(
+      { appId: session.appId }, structuredClone(replacement) as ApplicationDiscoverySession, { upsert: true },
+    );
+  }
+
+  async appendDiscoveryEvent(appId: string, event: ApplicationDiscoveryEvent, patch: Partial<Pick<ApplicationDiscoverySession, 'status' | 'progress' | 'phase' | 'error' | 'updatedAt'>> = {}): Promise<void> {
+    await this.db().collection<ApplicationDiscoverySession>('application_discovery_sessions').updateOne(
+      { appId }, { $push: { events: { $each: [structuredClone(event)], $slice: -300 } }, $set: { ...patch, updatedAt: patch.updatedAt ?? new Date().toISOString() } },
+    );
+  }
+
+  async updateDiscoveryDraft(
+    appId: string,
+    draft: ApplicationDiscoveryDraft,
+    coverage: ApplicationDiscoverySession['coverage'],
+    patch: Partial<Pick<ApplicationDiscoverySession, 'progress' | 'phase' | 'updatedAt'>> = {},
+  ): Promise<void> {
+    await this.db().collection<ApplicationDiscoverySession>('application_discovery_sessions').updateOne(
+      { appId },
+      { $set: { draft: structuredClone(draft), coverage: structuredClone(coverage), ...patch, updatedAt: patch.updatedAt ?? new Date().toISOString() } },
+    );
+  }
+
+  async updateGenerationJob(appId: string, jobId: string, update: Partial<BrowserGenerationJob>): Promise<void> {
+    await this.db().collection<BrowserGenerationJob>('app_generation_jobs').updateOne(
+      { appId, id: jobId }, { $set: { ...update, updatedAt: new Date().toISOString() } },
+    );
+  }
+
+  async appendGenerationEvent(appId: string, jobId: string, event: BrowserGenerationEvent): Promise<void> {
+    await this.db().collection<BrowserGenerationJob>('app_generation_jobs').updateOne(
+      { appId, id: jobId },
+      { $push: { events: { $each: [event], $slice: -500 } }, $set: { updatedAt: event.createdAt } },
+    );
+  }
+
+  async setAppLifecycle(appId: string, lifecycleStatus: BrowserApp['lifecycleStatus']): Promise<void> {
+    await this.db().collection<BrowserApp>('browser_apps').updateOne(
+      { id: appId }, { $set: { lifecycleStatus, updatedAt: new Date().toISOString() } },
+    );
+  }
+
   async platformRoles(subject: string): Promise<PlatformRole[]> {
     const assignments = await this.db().collection<PlatformRoleAssignment>('platform_role_assignments')
       .find({ subject, status: 'active' }).toArray();
@@ -175,19 +260,22 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
     const session = this.client!.startSession();
     try {
       await session.withTransaction(async () => {
-        await this.db().collection<BrowserApp>('browser_apps').insertOne(input.app, { session });
-        await this.db().collection<BrowserAppSpecification>('app_specifications').insertOne(input.specification, { session });
-        if (input.modules.length) await this.db().collection<AppModuleRecord>('app_modules').insertMany(input.modules, { session });
-        if (input.routes.length) await this.db().collection<RouteDefinition>('app_routes').insertMany(input.routes, { session });
-        if (input.schemas.length) await this.db().collection<DataSchemaRecord>('app_schemas').insertMany(input.schemas, { session });
-        if (input.policies.length) await this.db().collection<EntityPolicyRecord>('app_policies').insertMany(input.policies, { session });
-        if (input.connectors.length) await this.db().collection<ConnectorActionRecord>('app_connectors').insertMany(input.connectors, { session });
-        if (input.agents.length) await this.db().collection<BrowserAgentRecord>('app_agents').insertMany(input.agents, { session });
-        await this.db().collection<ThemeRevision>('app_themes').insertOne(input.theme, { session });
-        await this.db().collection<TenancyRevision>('app_tenancy_revisions').insertOne(input.tenancy, { session });
-        if (input.tenants.length) await this.db().collection<EndTenant>('app_end_tenants').insertMany(input.tenants, { session });
-        if (input.memberships.length) await this.db().collection<AppMembership>('app_memberships').insertMany(input.memberships, { session });
-        if (input.bindings.length) await this.db().collection<RouteBinding>('route_bindings').insertMany(input.bindings, { session });
+        // The MongoDB driver assigns `_id` directly onto inserted objects. Clone every
+        // caller-owned domain record so retries and template reuse cannot inherit a
+        // storage identity from a previous insert.
+        await this.db().collection<BrowserApp>('browser_apps').insertOne(structuredClone(input.app), { session });
+        await this.db().collection<BrowserAppSpecification>('app_specifications').insertOne(structuredClone(input.specification), { session });
+        if (input.modules.length) await this.db().collection<AppModuleRecord>('app_modules').insertMany(structuredClone(input.modules), { session });
+        if (input.routes.length) await this.db().collection<RouteDefinition>('app_routes').insertMany(structuredClone(input.routes), { session });
+        if (input.schemas.length) await this.db().collection<DataSchemaRecord>('app_schemas').insertMany(structuredClone(input.schemas), { session });
+        if (input.policies.length) await this.db().collection<EntityPolicyRecord>('app_policies').insertMany(structuredClone(input.policies), { session });
+        if (input.connectors.length) await this.db().collection<ConnectorActionRecord>('app_connectors').insertMany(structuredClone(input.connectors), { session });
+        if (input.agents.length) await this.db().collection<BrowserAgentRecord>('app_agents').insertMany(structuredClone(input.agents), { session });
+        await this.db().collection<ThemeRevision>('app_themes').insertOne(structuredClone(input.theme), { session });
+        await this.db().collection<TenancyRevision>('app_tenancy_revisions').insertOne(structuredClone(input.tenancy), { session });
+        if (input.tenants.length) await this.db().collection<EndTenant>('app_end_tenants').insertMany(structuredClone(input.tenants), { session });
+        if (input.memberships.length) await this.db().collection<AppMembership>('app_memberships').insertMany(structuredClone(input.memberships), { session });
+        if (input.bindings.length) await this.db().collection<RouteBinding>('route_bindings').insertMany(structuredClone(input.bindings), { session });
       });
     } finally {
       await session.endSession();
@@ -387,7 +475,7 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
   }
 
   async writeTenancyMigration(migration: TenancyMigration): Promise<void> {
-    await this.db().collection<TenancyMigration>('app_tenancy_migrations').insertOne(migration);
+    await this.db().collection<TenancyMigration>('app_tenancy_migrations').insertOne(structuredClone(migration));
   }
 
   async tenancyImpact(appId: string): Promise<{ totalRecords: number; scopedRecords: number; unscopedPrivateRecords: number }> {
@@ -411,7 +499,7 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
   }
 
   async insertTheme(theme: ThemeRevision): Promise<void> {
-    await this.db().collection<ThemeRevision>('app_themes').insertOne(theme);
+    await this.db().collection<ThemeRevision>('app_themes').insertOne(structuredClone(theme));
   }
 
   async nextThemeRevision(appId: string): Promise<number> {
@@ -715,7 +803,10 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
         ...item,
         revision: nextRevision,
         requirementIds: item.requirementIds ?? [],
-        description: patch?.description ?? (item.id === 'task-board-page' ? `${item.description} Agent revision: ${headline}` : item.description),
+        // Module metadata is a contract copied from the specification. Agent
+        // revisions may change implementation source, but not silently rewrite
+        // page purpose outside the PRD.
+        description: patch?.description ?? item.description,
         source,
         contentHash: createHash('sha256').update(source).digest('hex'),
         createdAt: new Date().toISOString(),
@@ -760,9 +851,9 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
     const app = await this.findApp(appId);
     if (!app) throw new Error('App not found');
     const nextRevision = app.sourceRevision + 1;
-    const [storedModules, storedRoutes, storedAgents, storedSchemas, storedPolicies] = await Promise.all([
+    const [storedModules, storedRoutes, storedAgents, storedSchemas, storedPolicies, storedConnectors] = await Promise.all([
       this.modules(app.id, app.sourceRevision), this.routes(app.id, app.sourceRevision), this.agents(app.id, app.sourceRevision),
-      this.schemas(app.id, app.schemaRevision), this.policies(app.id, app.policyRevision),
+      this.schemas(app.id, app.schemaRevision), this.policies(app.id, app.policyRevision), this.connectors(app.id, app.connectorRevision),
     ]);
     const strip = <T>(stored: T): T => {
       const value = { ...stored } as T & { _id?: ObjectId };
@@ -844,6 +935,18 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
     }) : storedPolicies;
     for (const patch of policyUpserts.values()) policies.push({ ...patch, appId: app.id, revision: nextPolicyRevision });
 
+    const connectorsChanged = changeSet.connectorUpserts.length > 0 || changeSet.connectorDeletes.length > 0;
+    const nextConnectorRevision = connectorsChanged ? app.connectorRevision + 1 : app.connectorRevision;
+    const connectorDeletes = new Set(changeSet.connectorDeletes);
+    const connectorUpserts = new Map(changeSet.connectorUpserts.map((item) => [item.id, item]));
+    const connectors = connectorsChanged ? storedConnectors.filter((item) => !connectorDeletes.has(item.id)).map((stored) => {
+      const current = strip(stored);
+      const patch = connectorUpserts.get(current.id);
+      if (patch) connectorUpserts.delete(current.id);
+      return { ...current, ...patch, appId: app.id, revision: nextConnectorRevision, requirementIds: patch?.requirementIds ?? current.requirementIds ?? [] } as ConnectorActionRecord;
+    }) : storedConnectors;
+    for (const patch of connectorUpserts.values()) connectors.push({ ...patch, appId: app.id, revision: nextConnectorRevision });
+
     if (!modules.length || !routes.length) throw new Error('A generated graph must retain at least one module and route');
     const moduleIds = new Set(modules.map((item) => item.id));
     if (routes.some((route) => !moduleIds.has(route.pageModuleId))) throw new Error('A generated route references a missing page module');
@@ -852,6 +955,8 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
     if (new Set(policies.map((policy) => policy.entity)).size !== policies.length) throw new Error('Generated entities must have unique policies');
     for (const schema of schemas) if (!policies.some((policy) => policy.entity === schema.entity)) throw new Error(`Generated entity ${schema.entity} has no policy`);
     for (const policy of policies) if (!schemas.some((schema) => schema.entity === policy.entity)) throw new Error(`Generated policy ${policy.id} has no schema`);
+    const connectorTools = new Set(connectors.map((connector) => `${connector.id}:${connector.action}`));
+    for (const agent of agents) for (const toolId of agent.toolIds) if (!connectorTools.has(toolId)) throw new Error(`Generated agent ${agent.id} references missing connector tool ${toolId}`);
 
     const session = this.client!.startSession();
     try {
@@ -861,10 +966,11 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
         if (agents.length) await this.db().collection<BrowserAgentRecord>('app_agents').insertMany(agents, { session });
         if (schemasChanged && schemas.length) await this.db().collection<DataSchemaRecord>('app_schemas').insertMany(schemas, { session });
         if (policiesChanged && policies.length) await this.db().collection<EntityPolicyRecord>('app_policies').insertMany(policies, { session });
+        if (connectorsChanged && connectors.length) await this.db().collection<ConnectorActionRecord>('app_connectors').insertMany(connectors, { session });
         const updated = await this.db().collection<BrowserApp>('browser_apps').updateOne(
-          { id: app.id, sourceRevision: app.sourceRevision, schemaRevision: app.schemaRevision, policyRevision: app.policyRevision },
+          { id: app.id, sourceRevision: app.sourceRevision, schemaRevision: app.schemaRevision, policyRevision: app.policyRevision, connectorRevision: app.connectorRevision },
           { $set: {
-            sourceRevision: nextRevision, schemaRevision: nextSchemaRevision, policyRevision: nextPolicyRevision,
+            sourceRevision: nextRevision, schemaRevision: nextSchemaRevision, policyRevision: nextPolicyRevision, connectorRevision: nextConnectorRevision,
             generatedFromSpecRevision: app.specRevision,
             updatedAt: new Date().toISOString(), agentAccent: accent, agentHeadline: headline,
             ...(generationProfile ? { generationProfile } : {}),
@@ -875,6 +981,10 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
       });
     } finally {
       await session.endSession();
+    }
+    if (schemasChanged) {
+      const defaultTenant = app.tenancyMode === 'multi_organization' ? (await this.endTenants(app.id))[0]?.id : undefined;
+      await this.migrateEntityTenancy(app.id, app.tenancyMode, defaultTenant);
     }
     return nextRevision;
   }
@@ -902,13 +1012,21 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
           { appId, revision: { $ne: next.revision }, status: 'approved' }, { $set: { status: 'superseded' } }, { session },
         );
         await this.db().collection<BrowserApp>('browser_apps').updateOne(
-          { id: appId, specRevision: expectedRevision }, { $set: { specRevision: next.revision, updatedAt: createdAt } }, { session },
+          { id: appId, specRevision: expectedRevision }, { $set: { specRevision: next.revision, specificationApprovalStatus: 'draft', updatedAt: createdAt } }, { session },
         );
       });
       return next;
     } finally {
       await session.endSession();
     }
+  }
+
+  async setSpecificationApproval(appId: string, expectedRevision: number, status: BrowserApp['specificationApprovalStatus']): Promise<void> {
+    const result = await this.db().collection<BrowserApp>('browser_apps').updateOne(
+      { id: appId, specRevision: expectedRevision },
+      { $set: { specificationApprovalStatus: status, updatedAt: new Date().toISOString() } },
+    );
+    if (!result.matchedCount) throw new Error('Application specification changed; reload before approving');
   }
 
   async restoreSourceRevision(appId: string, sourceRevision: number, generatedFromSpecRevision?: number): Promise<void> {
@@ -986,6 +1104,9 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
       this.db().collection<RouteDefinition>('app_routes').createIndex({ appId: 1, revision: 1, path: 1 }, { unique: true }),
       this.db().collection<RouteBinding>('route_bindings').createIndex({ hostname: 1, pathPrefix: 1 }, { unique: true }),
       this.db().collection<AppBuild>('app_builds').createIndex({ appId: 1, createdAt: -1 }),
+      this.db().collection<BrowserGenerationJob>('app_generation_jobs').createIndex({ appId: 1, createdAt: -1 }),
+      this.db().collection<BrowserGenerationJob>('app_generation_jobs').createIndex({ id: 1 }, { unique: true }),
+      this.db().collection<ApplicationDiscoverySession>('application_discovery_sessions').createIndex({ appId: 1 }, { unique: true }),
       this.db().collection<BrowserRelease>('browser_releases').createIndex(
         { appId: 1, releaseKey: 1 }, { unique: true, partialFilterExpression: { releaseKey: { $type: 'string' } } },
       ),
@@ -1009,20 +1130,20 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
     if (await this.findApp(seedBrowserApp.id)) return;
     if (process.env.NODE_ENV === 'production' && process.env.SEED_BROWSER_DEMO !== 'true') return;
     await Promise.all([
-      this.db().collection<BrowserApp>('browser_apps').insertOne(seedBrowserApp),
-      this.db().collection<BrowserAppSpecification>('app_specifications').insertOne(seedBrowserAppSpecification),
-      this.db().collection<AppModuleRecord>('app_modules').insertMany(seedModules),
-      this.db().collection<RouteDefinition>('app_routes').insertMany(seedRoutes),
-      this.db().collection<DataSchemaRecord>('app_schemas').insertMany(seedSchemas),
-      this.db().collection<EntityPolicyRecord>('app_policies').insertMany(seedPolicies),
-      this.db().collection<ConnectorActionRecord>('app_connectors').insertMany(seedConnectors),
-      this.db().collection<BrowserAgentRecord>('app_agents').insertMany(seedAgents),
-      this.db().collection<RouteBinding>('route_bindings').insertMany(seedBindings),
-      this.db().collection<ThemeRevision>('app_themes').insertOne(seedTheme),
-      this.db().collection<TenancyRevision>('app_tenancy_revisions').insertOne(seedTenancy),
-      this.db().collection<EndTenant>('app_end_tenants').insertMany(seedEndTenants),
-      this.db().collection<AppMembership>('app_memberships').insertMany(seedMemberships),
-      this.db().collection(seedSchemas[0]!.physicalCollection).insertMany(seedTasks),
+      this.db().collection<BrowserApp>('browser_apps').insertOne(structuredClone(seedBrowserApp)),
+      this.db().collection<BrowserAppSpecification>('app_specifications').insertOne(structuredClone(seedBrowserAppSpecification)),
+      this.db().collection<AppModuleRecord>('app_modules').insertMany(structuredClone(seedModules)),
+      this.db().collection<RouteDefinition>('app_routes').insertMany(structuredClone(seedRoutes)),
+      this.db().collection<DataSchemaRecord>('app_schemas').insertMany(structuredClone(seedSchemas)),
+      this.db().collection<EntityPolicyRecord>('app_policies').insertMany(structuredClone(seedPolicies)),
+      this.db().collection<ConnectorActionRecord>('app_connectors').insertMany(structuredClone(seedConnectors)),
+      this.db().collection<BrowserAgentRecord>('app_agents').insertMany(structuredClone(seedAgents)),
+      this.db().collection<RouteBinding>('route_bindings').insertMany(structuredClone(seedBindings)),
+      this.db().collection<ThemeRevision>('app_themes').insertOne(structuredClone(seedTheme)),
+      this.db().collection<TenancyRevision>('app_tenancy_revisions').insertOne(structuredClone(seedTenancy)),
+      this.db().collection<EndTenant>('app_end_tenants').insertMany(structuredClone(seedEndTenants)),
+      this.db().collection<AppMembership>('app_memberships').insertMany(structuredClone(seedMemberships)),
+      this.db().collection(seedSchemas[0]!.physicalCollection).insertMany(structuredClone(seedTasks)),
     ]);
     await this.migrateEntityTenancy(seedBrowserApp.id, seedTenancy.mode, seedEndTenants[0]!.id);
   }
@@ -1146,10 +1267,12 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
           const structure: AppStructuredSpecification = app.id === seedBrowserApp.id ? structuredClone(seedBrowserAppSpecification.structure) : {
             purpose: specification.sections[0]?.body ?? app.description,
             audience: app.tenancyMode,
+            personas: [], userStories: [],
             roles: ['public', 'viewer', 'editor', 'admin'].map((id) => ({ id, name: id[0]!.toUpperCase() + id.slice(1), description: `${id} application role.` })),
             pages: routes.map((route) => ({ id: `page-${route.id}`, name: modules.find((module) => module.id === route.pageModuleId)?.name ?? route.id, path: route.path, purpose: modules.find((module) => module.id === route.pageModuleId)?.description ?? 'Application page.', public: route.public, roleIds: ['public', 'viewer', 'editor', 'admin'], states: ['loading', 'empty', 'error', 'forbidden', 'ready'] as AppStructuredSpecification['pages'][number]['states'], entityIds: schemas.map((schema) => schema.entity), workflowIds: [], agentIds: [], acceptanceCriterionIds: [] })),
             entities: schemas.map((schema) => ({ id: schema.entity, name: schema.displayName, description: `${schema.displayName} application data.`, fields: Object.entries((schema.jsonSchema.properties ?? {}) as Record<string, Record<string, unknown>>).map(([id, value]) => ({ id, type: (typeof value.type === 'string' && ['string', 'number', 'boolean', 'object', 'array'].includes(value.type) ? value.type : value.enum ? 'enum' : 'string') as AppStructuredSpecification['entities'][number]['fields'][number]['type'], required: Array.isArray(schema.jsonSchema.required) && schema.jsonSchema.required.includes(id), description: `${schema.displayName} ${id}.` })) })),
-            workflows: [], agents: [],
+            workflows: [], agents: [], integrations: [], decisions: [], qualityAttributes: [],
+            designBrief: { tone: 'Clear and trustworthy.', principles: ['Accessible interaction'], accessibilityTarget: 'AA' },
             acceptanceCriteria: specification.sections.map((section) => ({ id: `accept-${section.id}`, requirementId: section.id, description: section.body, kind: 'journey' as const })),
           };
           await this.db().collection<BrowserAppSpecification>('app_specifications').updateOne({ _id: specification._id }, { $set: { structure } });
@@ -1168,6 +1291,45 @@ export class BrowserAppRepository implements OnModuleInit, OnModuleDestroy {
         );
       }
       await migrations.insertOne({ id: 'browser-authoritative-spec-v4', appliedAt: new Date().toISOString() });
+    }
+    if (!(await migrations.findOne({ id: 'browser-app-lifecycle-v5' }))) {
+      const apps = await this.db().collection<BrowserApp>('browser_apps').find().toArray();
+      for (const app of apps) {
+        const lifecycleStatus: BrowserApp['lifecycleStatus'] = app.activeReleaseId ? 'production'
+          : app.previewReleaseId ? 'preview_ready'
+            : app.generatedFromSpecRevision === app.specRevision && app.sourceRevision > 0 ? 'specifying' : 'draft';
+        await this.db().collection<BrowserApp>('browser_apps').updateOne({ id: app.id }, { $set: { lifecycleStatus } });
+      }
+      await migrations.insertOne({ id: 'browser-app-lifecycle-v5', appliedAt: new Date().toISOString() });
+    }
+    if (!(await migrations.findOne({ id: 'generic-application-definition-v6' }))) {
+      const apps = await this.db().collection<BrowserApp>('browser_apps').find().toArray();
+      for (const app of apps) {
+        const profile = app.profile ?? defaultApplicationProfile('browser_data', app.tenancyMode);
+        await this.db().collection<BrowserApp>('browser_apps').updateOne({ id: app.id }, { $set: {
+          profile,
+          runtimeProfile: app.runtimeProfile ?? 'browser_data',
+          generatorId: app.generatorId ?? 'browser-data',
+          specificationApprovalStatus: app.specificationApprovalStatus ?? 'approved',
+        } });
+        const specifications = await this.db().collection<BrowserAppSpecification>('app_specifications').find({ appId: app.id }).toArray();
+        for (const specification of specifications) {
+          const structure = specification.structure;
+          if (!structure) continue;
+          const roles = structure.roles ?? [];
+          const pages = structure.pages ?? [];
+          const connectors = await this.db().collection<ConnectorActionRecord>('app_connectors').find({ appId: app.id }).toArray();
+          await this.db().collection<BrowserAppSpecification>('app_specifications').updateOne({ _id: specification._id }, { $set: {
+            'structure.personas': structure.personas ?? [{ id: 'primary-user', name: 'Primary user', description: 'Uses the application to achieve its principal outcome.', goals: [structure.purpose], painPoints: [], roleIds: roles.filter((role) => role.id !== 'public').map((role) => role.id) }],
+            'structure.userStories': structure.userStories ?? pages.map((page) => ({ id: `story-${page.id}`, title: page.name, personaId: 'primary-user', statement: `As a primary user, I want to ${page.purpose.toLowerCase()}`, priority: 'must', surfaceIds: [page.id], workflowIds: page.workflowIds, acceptanceCriterionIds: page.acceptanceCriterionIds })),
+            'structure.integrations': structure.integrations ?? connectors.map((connector) => ({ id: connector.id, name: connector.id, purpose: connector.description, connector: connector.connector, operations: [connector.action], failureBehavior: 'Expose a recoverable error and preserve manual work.', dataClassification: 'standard' })),
+            'structure.decisions': structure.decisions ?? [],
+            'structure.qualityAttributes': structure.qualityAttributes ?? [{ id: 'accessible-ui', category: 'accessibility', requirement: 'Core application journeys are accessible.', measure: 'WCAG 2.2 AA checks pass.' }],
+            'structure.designBrief': structure.designBrief ?? { tone: 'Clear, trustworthy and appropriate for the work.', principles: ['Clear hierarchy', 'Visible system state', 'Accessible interaction'], accessibilityTarget: 'AA' },
+          } });
+        }
+      }
+      await migrations.insertOne({ id: 'generic-application-definition-v6', appliedAt: new Date().toISOString() });
     }
   }
 }

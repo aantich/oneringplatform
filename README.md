@@ -8,12 +8,23 @@ superadmin MVP are specified in
 The implemented lightweight generation, browser-agent, preview, and release
 contract is documented in
 [`docs/BROWSER_NATIVE_APP_GENERATION.md`](docs/BROWSER_NATIVE_APP_GENERATION.md).
+The generic profile, tool-driven discovery, structured specification, and
+generator-module boundary are documented in
+[`docs/APPLICATION_DEFINITION_PIPELINE.md`](docs/APPLICATION_DEFINITION_PIPELINE.md).
 
 ## Included vertical slice
 
 - Visual living application blueprint backed by stable structured-spec IDs.
-- AI discovery interview using the local `@everworker/oneringai` connector-first API.
-- Living PRD with approval/version semantics.
+- Generic application profiles covering product type, tenancy, identity,
+  agent authority, data sensitivity, execution placement, and deployment target.
+- Tool-driven AI discovery using the local `@everworker/oneringai`
+  connector-first API; agents perform validated, focused JSON operations.
+- One versioned application definition projected as the interview, PRD,
+  blueprint, pages, data, workflows, runtime agents, decisions, quality
+  attributes, design brief, and acceptance evidence.
+- Explicit specification approval and a capability-based generator registry;
+  browser/Mongo generation is available now while other profiles remain fully
+  specifiable without pretending their generator exists.
 - Superadmin Builder System Studio for agents, prompts, models, tools, plugins, and connector availability.
 - Persistent hosted-development run records with workspace and verification gates.
 - Immutable preview releases, evidence ledger, idempotent production promotion, and rollback-ready provenance.
@@ -82,21 +93,26 @@ Open the control plane at `http://127.0.0.1:5173`. Tenant owners/admins can open
 designate it as a login provider, restrict automatic membership by email domain,
 and optionally enable local test credentials. Register
 `http://127.0.0.1:4100/api/auth/oauth/callback` as the OAuth callback locally.
-Then select **Browser Apps**.
-Edit **Living requirements**, **Pages & states**, **Workflows**, **Data model**,
-and **Browser agents**, then save the specification. **Generate preview** writes
-an immutable candidate graph and runs the bounded verification/repair loop.
-Before generating, choose the specialist team and each specialist's connector,
-model, and reasoning effort; only configured providers are selectable when a
-provider credential is available. The exact resolved team is stored on the app
-and copied into build/release provenance. Production remains unchanged until
-**Promote verified preview** activates that
-exact artifact without rebuilding.
-Use **Users & tenancy** to select the audience model, manage organizations and
-role-bearing memberships, and publish the verified tenancy contract.
-Use **Visual design** to ask the dedicated agent for an art direction, start from
-a curated design system, edit every token and component treatment, preview it,
-and publish the approved revision.
+Then select **Applications** and create an application. First choose its type,
+audience, name, and desired outcome. **Define** opens the primary split-screen
+experience: a one-question-at-a-time interview on the left and the live
+structured definition on the right. Every specification tool call durably
+updates the document and visual **Blueprint** while the agent is working.
+Personas, stories, pages, workflows, data, agent contracts, integrations, design
+direction, and traceable evidence remain projections of that one source of
+truth. Confirmation is blocked when deterministic validation finds conflicting
+product intent or broken references.
+
+After **Looks good — build my app**, **Build** uses a balanced specialist team by
+default and shows stages, workers, safe reasoning summaries, tool calls, model
+events, verification, and errors. Connector, model, reasoning effort, and build
+instruction controls remain available under **Advanced build settings**. The
+resolved team is stored on the app and copied into build/release provenance.
+**Preview** embeds the actual isolated application; **Publish this preview**
+activates the exact reviewed artifact without rebuilding. Administrative
+tenancy, members, domains, technical architecture, release evidence, and visual
+design controls remain available under **Settings** without interrupting the
+main interview-to-build path.
 The generated application is directly available at
 `http://127.0.0.1:5173/apps/pulse-tasks/`. The API runs at
 `http://127.0.0.1:4100/api`.
@@ -136,7 +152,7 @@ npm run test:ai:live
 This requires both `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` in
 `apps/api/.env`. Provider-specific models can be selected with
 `ONERING_OPENAI_MODEL` and `ONERING_ANTHROPIC_MODEL`.
-Normal app generation does not require both: the Browser Apps studio lists the
+Normal app generation does not require both: the Applications studio lists the
 configured OpenAI and/or Anthropic connectors and obtains their active model
 catalogs from the installed OneRingAI version. Each selected specialist uses
 its own connector, model, and reasoning-effort setting.

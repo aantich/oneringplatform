@@ -4,8 +4,9 @@ import * as esbuild from 'esbuild';
 import type { AppBuild, BrowserRelease, ReleaseCheck, RouteDefinition } from './browser-app.domain.js';
 import { BrowserAppRepository } from './browser-app.repository.js';
 import { BrowserAppThemeCompilerService } from './browser-app-theme-compiler.service.js';
+import { browserRuntimeContractVersion } from './browser-runtime-capabilities.js';
 
-export const browserRuntimeContractVersion = 3;
+export { browserRuntimeContractVersion } from './browser-runtime-capabilities.js';
 export const browserGeneratorVersion = 'browser-graph-v2';
 
 const runtimeModule = `const root = document.getElementById('root');
@@ -33,6 +34,23 @@ export async function api(path, init = {}) {
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.message || 'Request failed (' + response.status + ')');
   return body;
+}
+const segment = (value) => encodeURIComponent(String(value));
+export const data = Object.freeze({
+  list(entity, options = {}) {
+    const query = new URLSearchParams();
+    if (options.limit != null) query.set('limit', String(options.limit));
+    if (options.cursor) query.set('cursor', String(options.cursor));
+    const suffix = query.size ? '?' + query.toString() : '';
+    return api('/data/' + segment(entity) + suffix);
+  },
+  get(entity, id) { return api('/data/' + segment(entity) + '/' + segment(id)); },
+  create(entity, value) { return api('/data/' + segment(entity), { method: 'POST', body: JSON.stringify(value) }); },
+  update(entity, id, value, version) { return api('/data/' + segment(entity) + '/' + segment(id), { method: 'PATCH', headers: { 'if-match': String(version) }, body: JSON.stringify(value) }); },
+  remove(entity, id, version) { return api('/data/' + segment(entity) + '/' + segment(id), { method: 'DELETE', headers: { 'if-match': String(version) } }); },
+});
+export function invokeConnector(connectorId, action, input = {}) {
+  return api('/connectors/' + segment(connectorId) + '/actions/' + segment(action), { method: 'POST', body: JSON.stringify(input) });
 }
 export async function setDemoRole(role) {
   const context = await bootstrap();
@@ -120,6 +138,7 @@ export class BrowserAppBuildService implements OnApplicationBootstrap {
     const apps = await this.repository.listApps();
     for (const app of apps) {
       await this.repository.expireIncompatiblePreviews(app.id, browserRuntimeContractVersion, browserGeneratorVersion);
+      if (app.sourceRevision === 0 || app.lifecycleStatus === 'draft' || app.lifecycleStatus === 'specifying' || app.lifecycleStatus === 'generation_failed') continue;
       const active = await this.repository.activeRelease(app.id);
       if (!active || active.release.tenancyRevision !== app.tenancyRevision || active.release.runtimeVersion !== browserRuntimeContractVersion) {
         try {
@@ -174,6 +193,7 @@ export class BrowserAppBuildService implements OnApplicationBootstrap {
     try {
       await this.check(build, 'graph', 'Module and route graph', () => this.validateGraph(detail.modules.map((item) => item.id), detail.routes));
       await this.check(build, 'specification', 'Structured specification contract', () => this.validateSpecification(detail));
+      await this.check(build, 'semantic-alignment', 'Specification and generated experience alignment', () => this.validateSemanticAlignment(detail));
       await this.check(build, 'traceability', 'Requirement and acceptance coverage', () => {
         build.acceptance = this.validateTraceability(detail);
       });
@@ -361,6 +381,57 @@ export class BrowserAppBuildService implements OnApplicationBootstrap {
     return { total: acceptanceRequirementIds.length, covered: acceptanceRequirementIds.filter((id) => referenced.has(id)).length, requirementIds: covered };
   }
 
+  private validateSemanticAlignment(detail: NonNullable<Awaited<ReturnType<BrowserAppRepository['detail']>>>): void {
+    const specification = detail.specification;
+    const declared = [
+      specification.structure.purpose,
+      ...specification.sections.flatMap((section) => [section.title, section.body]),
+      ...specification.structure.pages.flatMap((page) => [page.name, page.purpose]),
+      ...specification.structure.entities.flatMap((entity) => [entity.name, entity.description]),
+      ...specification.structure.agents.flatMap((agent) => [agent.name, agent.purpose]),
+    ].join('\n').toLowerCase();
+    const generated = detail.modules.map((module) => `${module.name}\n${module.description}\n${module.source}`).join('\n').toLowerCase();
+    const criteria = specification.structure.acceptanceCriteria.map((criterion) => criterion.description).join('\n').toLowerCase();
+    const contamination = [
+      { phrase: 'fieldops', declaredConcept: /field\s*ops|field service|technician/ },
+      { phrase: 'technician assigned', declaredConcept: /technician|field service/ },
+      { phrase: 'team tasks', declaredConcept: /task|work item|team work/ },
+      { phrase: 'suggest my next task', declaredConcept: /task|work item|team work/ },
+      { phrase: 'make progress visible', declaredConcept: /task|progress|team work/ },
+      { phrase: 'acme operations', declaredConcept: /acme|operations|operational/ },
+    ];
+    for (const { phrase, declaredConcept } of contamination) {
+      if (!declaredConcept.test(declared) && (generated.includes(phrase) || criteria.includes(phrase))) {
+        throw new Error(`Generated experience contains unrelated seeded concept: ${phrase}`);
+      }
+    }
+    for (const page of specification.structure.pages) {
+      const route = detail.routes.find((candidate) => candidate.specPageId === page.id);
+      const module = route && detail.modules.find((candidate) => candidate.id === route.pageModuleId);
+      if (!module) throw new Error(`Page ${page.name} has no generated module`);
+      if (module.name !== page.name || module.description !== page.purpose) throw new Error(`Page ${page.name} implementation metadata is stale`);
+      const expectedRequirementIds = new Set(page.acceptanceCriterionIds.flatMap((criterionId) => {
+        const criterion = specification.structure.acceptanceCriteria.find((candidate) => candidate.id === criterionId);
+        return criterion ? [criterion.requirementId] : [];
+      }));
+      for (const requirementId of expectedRequirementIds) if (!module.requirementIds.includes(requirementId)) throw new Error(`Page ${page.name} does not trace requirement ${requirementId}`);
+    }
+    const editorialSignals = [
+      specification.structure.purpose,
+      ...specification.structure.pages.flatMap((page) => [page.id, page.name, page.purpose]),
+      ...specification.structure.entities.flatMap((entity) => [entity.id, entity.name, entity.description]),
+      ...specification.structure.agents.flatMap((agent) => [agent.id, agent.name, agent.purpose]),
+    ].join('\n').toLowerCase();
+    const purposeLooksEditorial = /\b(blog|blogging|journal|article|story|stories|editorial|publishing)\b/.test(editorialSignals);
+    if (purposeLooksEditorial) {
+      if (!specification.structure.entities.some((entity) => entity.id === 'articles')) throw new Error('Editorial applications require an articles entity');
+      if (!specification.structure.pages.some((page) => page.public) || !specification.structure.pages.some((page) => !page.public)) throw new Error('Editorial applications require both public reading and private editorial pages');
+      const articleSchema = detail.schemas.find((schema) => schema.entity === 'articles');
+      const articlePolicy = detail.policies.find((policy) => policy.entity === 'articles');
+      if (!articleSchema?.publicRecordFilter || !articlePolicy?.grants.public.operations.includes('read')) throw new Error('Published articles need an explicit public-read filter and policy');
+    }
+  }
+
   private validateAcceptance(detail: NonNullable<Awaited<ReturnType<BrowserAppRepository['detail']>>>): void {
     const specification = detail.specification.structure;
     for (const criterion of specification.acceptanceCriteria) {
@@ -422,13 +493,13 @@ export class BrowserAppBuildService implements OnApplicationBootstrap {
     const imports = routes.map((route, index) => `import Page${index} from 'app:module/${route.pageModuleId}';`).join('\n');
     const routeElements = routes.map((route, index) => `<Route path=${JSON.stringify(route.path)} element={<RouteGate isPublic={${route.public}} required={${JSON.stringify(route.requiredCapabilities)}}><Page${index} /></RouteGate>} />`).join('\n');
     const navigation = routes
-      .filter((route) => route.navigation)
+      .filter((route) => route.navigation && !route.path.includes(':'))
       .map((route) => `<NavLink to=${JSON.stringify(route.path)}>{${JSON.stringify(route.navigation?.label)}}</NavLink>`)
       .join('\n');
     return `import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, NavLink, Route, Routes } from 'react-router-dom';
-import { basePath, bootstrap, switchOrganization } from 'app:runtime';
+import { basePath, bootstrap, setDemoRole, switchOrganization } from 'app:runtime';
 ${imports}
 function RuntimeIdentity() {
   const [session, setSession] = useState();
@@ -440,6 +511,9 @@ function RuntimeIdentity() {
   }, []);
   if (!session) return <span className="runtime-badge">Secure session</span>;
   const tenancy = session.tenancy;
+  if (session.demoAuthentication) {
+    return <div className="runtime-identity-cluster"><label className="runtime-identity"><span>Test role</span><select aria-label="Test application role" value={session.principal.role} onChange={(event) => void setDemoRole(event.target.value)}>{['public','viewer','editor','admin'].map((role) => <option key={role} value={role}>{role}</option>)}</select></label>{tenancy.mode === 'multi_organization' && session.principal.role !== 'public' && <label className="runtime-identity"><span>{tenancy.organizationLabel}</span><select aria-label={'Active ' + tenancy.organizationLabel} value={tenancy.activeOrganization?.id || ''} onChange={(event) => void switchOrganization(event.target.value)}>{tenancy.organizations.map((organization) => <option key={organization.id} value={organization.id}>{organization.name} · {organization.role}</option>)}</select></label>}</div>;
+  }
   if (tenancy.mode === 'multi_organization' && session.principal.role !== 'public') {
     return <label className="runtime-identity"><span>{tenancy.organizationLabel}</span><select aria-label={'Active ' + tenancy.organizationLabel} value={tenancy.activeOrganization?.id || ''} onChange={(event) => void switchOrganization(event.target.value)}>{tenancy.organizations.map((organization) => <option key={organization.id} value={organization.id}>{organization.name} · {organization.role}</option>)}</select></label>;
   }
@@ -447,7 +521,12 @@ function RuntimeIdentity() {
 }
 function RouteGate({ isPublic, required, children }) {
   const [session, setSession] = useState();
-  useEffect(() => { bootstrap().then(setSession).catch(() => setSession({ error: true })); }, []);
+  useEffect(() => {
+    const receive = (event) => setSession(event.detail);
+    bootstrap().then(setSession).catch(() => setSession({ error: true }));
+    window.addEventListener('onering:session', receive);
+    return () => window.removeEventListener('onering:session', receive);
+  }, []);
   if (!session) return <main className="about-page"><span className="eyebrow">LOADING</span><h1>Checking access…</h1></main>;
   if (session.error || (!isPublic && session.principal.role === 'public') || required.some((capability) => !session.capabilities.includes(capability))) return <main className="about-page"><span className="eyebrow">ACCESS DENIED</span><h1>You do not have permission to open this page.</h1></main>;
   return children;

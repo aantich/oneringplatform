@@ -1,26 +1,44 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Bot, Box, Braces, Cable, Check, CircleAlert, ClipboardCheck, Code2, Database, ExternalLink, FileText, GitBranch, Globe2, LoaderCircle, Palette, Play, Plus, RefreshCw, Route, Save, ShieldCheck, Sparkles, Trash2, UsersRound } from 'lucide-react';
+import { ArrowLeft, Bot, Check, CircleAlert, Clock3, Code2, Database, ExternalLink, FileText, GitBranch, Globe2, LoaderCircle, Palette, Play, Plus, Rocket, Settings, ShieldCheck, Sparkles, Wrench, X } from 'lucide-react';
 import { api } from '../api';
-import type { AppStructuredSpecification, AppTenancyMode, BrowserAppDetail, BrowserAppModule, BrowserAppSummary, BrowserGenerationAgentConfiguration, BrowserGenerationOptions, BrowserGenerationProfile, GenerationEffort } from '../types';
-import { VisualDesignStudio } from './VisualDesignStudio';
+import type { ApplicationGeneratorManifest, ApplicationProfile, ApplicationType, AppTenancyMode, BrowserAppDetail, BrowserAppSummary, BrowserGenerationAgentConfiguration, BrowserGenerationJob, BrowserGenerationOptions, BrowserGenerationProfile, GenerationEffort } from '../types';
+import { ApplicationDiscovery } from './ApplicationDiscovery';
 import { TenancyStudio } from './TenancyStudio';
+import { VisualDesignStudio } from './VisualDesignStudio';
 
-type Panel = 'requirements' | 'pages' | 'workflows' | 'tenancy' | 'design' | 'modules' | 'routes' | 'data' | 'security' | 'agents' | 'connectors' | 'evidence';
+type WorkspaceArea = 'define' | 'build' | 'review' | 'settings';
 
-const panels: Array<{ id: Panel; label: string; icon: typeof Box }> = [
-  { id: 'requirements', label: 'Living requirements', icon: FileText },
-  { id: 'pages', label: 'Pages & states', icon: Route },
-  { id: 'workflows', label: 'Workflows', icon: GitBranch },
-  { id: 'tenancy', label: 'Users & tenancy', icon: UsersRound },
-  { id: 'design', label: 'Visual design', icon: Palette },
-  { id: 'modules', label: 'Modules', icon: Code2 },
-  { id: 'routes', label: 'Routes', icon: Route },
-  { id: 'data', label: 'Data model', icon: Database },
-  { id: 'security', label: 'Security', icon: ShieldCheck },
-  { id: 'agents', label: 'Browser agents', icon: Sparkles },
-  { id: 'connectors', label: 'Connectors', icon: Cable },
-  { id: 'evidence', label: 'Release evidence', icon: ClipboardCheck },
+const applicationTypes: Array<[ApplicationType, string, string]> = [
+  ['browser_data', 'Browser app', 'Interactive UI, MongoDB data, workflows, and optional agents.'],
+  ['full_stack', 'Full application', 'Browser and server application code.'],
+  ['api_service', 'API or service', 'A managed server API and integration surface.'],
+  ['workflow_automation', 'Automation', 'Scheduled, event-driven, and durable workflows.'],
+  ['mobile', 'Mobile app', 'A native mobile product definition.'],
 ];
+
+const tenancyChoices: Array<[AppTenancyMode, string, string]> = [
+  ['personal', 'Just me', 'One private workspace'],
+  ['team', 'My team', 'One shared workspace'],
+  ['multi_organization', 'Customer organizations', 'Many isolated tenants'],
+];
+
+function defaultApplicationProfile(applicationType: ApplicationType = 'browser_data', tenancyMode: AppTenancyMode = 'team'): ApplicationProfile {
+  return {
+    applicationType,
+    tenancyMode,
+    identityMode: tenancyMode === 'personal' ? 'private' : 'public_and_authenticated',
+    agenticLevel: 'assistive',
+    dataSensitivity: 'standard',
+    deploymentTarget: 'managed_platform',
+    execution: {
+      browser: ['browser_data', 'full_stack', 'mobile'].includes(applicationType),
+      server: ['full_stack', 'api_service', 'workflow_automation'].includes(applicationType),
+      backgroundJobs: applicationType === 'workflow_automation',
+      schedules: applicationType === 'workflow_automation',
+      webhooks: ['api_service', 'workflow_automation'].includes(applicationType),
+    },
+  };
+}
 
 function profileForApp(detail: BrowserAppDetail, options: BrowserGenerationOptions): BrowserGenerationProfile {
   const stored = detail.app.generationProfile;
@@ -30,308 +48,249 @@ function profileForApp(detail: BrowserAppDetail, options: BrowserGenerationOptio
     const template = options.agents.find((candidate) => candidate.id === configuration.templateId);
     if (!template) return [];
     const connector = options.connectors.find((candidate) => candidate.id === configuration.connector);
-    const available = connector && (!configuredConnectorExists || connector.configured)
-      && connector.models.some((model) => model.id === configuration.model);
-    return [{
-      ...(available ? configuration : template.defaultConfiguration),
-      templateVersion: template.defaultConfiguration.templateVersion,
-      name: template.name,
-      role: template.role,
-    }];
+    const valid = connector && (!configuredConnectorExists || connector.configured) && connector.models.some((model) => model.id === configuration.model);
+    return [{ ...(valid ? configuration : template.defaultConfiguration), templateVersion: template.defaultConfiguration.templateVersion, name: template.name, role: template.role }];
   });
   return agents.length ? { agents, updatedAt: stored.updatedAt } : structuredClone(options.defaultProfile);
 }
 
+function friendlyPhase(job: BrowserGenerationJob) {
+  if (job.status === 'completed') return 'Your preview is ready';
+  if (job.status === 'failed') return 'Build stopped safely';
+  if (job.status === 'cancelled') return 'Build cancelled';
+  if (job.phase === 'preparing' || job.phase === 'queued') return 'Understanding the approved application';
+  if (job.phase.startsWith('agent:')) return 'Designing and implementing the experience';
+  if (job.phase === 'compiling') return 'Assembling pages, data, workflows, and agents';
+  if (job.phase === 'validating') return 'Testing security and product behavior';
+  return job.phase.replaceAll('_', ' ');
+}
+
 export function BrowserAppsStudio() {
   const [apps, setApps] = useState<BrowserAppSummary[]>([]);
-  const [loaded, setLoaded] = useState(false);
   const [detail, setDetail] = useState<BrowserAppDetail>();
   const [generationOptions, setGenerationOptions] = useState<BrowserGenerationOptions>();
+  const [generators, setGenerators] = useState<ApplicationGeneratorManifest[]>([]);
   const [generationProfile, setGenerationProfile] = useState<BrowserGenerationProfile>();
-  const [selectedAppId, setSelectedAppId] = useState<string>();
-  const [panel, setPanel] = useState<Panel>('tenancy');
-  const [selectedModule, setSelectedModule] = useState<BrowserAppModule>();
-  const [instruction, setInstruction] = useState('Refine the visual hierarchy while preserving every security contract.');
-  const [domain, setDomain] = useState('pulse.customer.localhost');
-  const [busy, setBusy] = useState<'generate' | 'build' | 'create'>();
+  const [generationJob, setGenerationJob] = useState<BrowserGenerationJob | null>();
+  const [area, setArea] = useState<WorkspaceArea>('define');
+  const [showLibrary, setShowLibrary] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
-  const [newApp, setNewApp] = useState<{ name: string; description: string; mode: AppTenancyMode }>({ name: '', description: '', mode: 'team' });
-  const [requirements, setRequirements] = useState<BrowserAppDetail['specification']['sections']>([]);
-  const [structure, setStructure] = useState<AppStructuredSpecification>();
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState<'create' | 'confirm' | 'generate' | 'promote' | 'domain'>();
   const [notice, setNotice] = useState<string>();
   const [error, setError] = useState<string>();
+  const [instruction, setInstruction] = useState('Build the complete application described by the approved definition. Preserve security, tenancy, accessibility, visual direction, and release contracts.');
+  const [domain, setDomain] = useState('');
+  const [newApp, setNewApp] = useState({ name: '', description: '', profile: defaultApplicationProfile() });
 
-  async function load() {
+  async function loadLibrary() {
     try {
-      const [list, options] = await Promise.all([api.browserApps(), api.browserGenerationOptions()]);
-      setGenerationOptions(options);
+      const [list, options, manifests] = await Promise.all([api.browserApps(), api.browserGenerationOptions(), api.applicationGenerators()]);
       setApps(list);
-      const target = list.find((item) => item.id === selectedAppId) ?? list[0];
-      if (target) {
-        const next = await api.browserApp(target.id);
-        setSelectedAppId(target.id);
-        setDetail(next);
-        setGenerationProfile(profileForApp(next, options));
-        setRequirements(structuredClone(next.specification.sections));
-        setStructure(structuredClone(next.specification.structure));
-        setSelectedModule((current) => next.modules.find((item) => item.id === current?.id) ?? next.modules[0]);
-      } else {
-        setSelectedAppId(undefined);
-        setDetail(undefined);
-        setGenerationProfile(structuredClone(options.defaultProfile));
-        setStructure(undefined);
-        setSelectedModule(undefined);
-      }
+      setGenerationOptions(options);
+      setGenerators(manifests);
+      if (!list.length) setShowCreate(true);
       setError(undefined);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to load browser apps'); }
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to load applications'); }
     finally { setLoaded(true); }
   }
 
-  useEffect(() => { void load(); }, []);
-  const app = apps.find((item) => item.id === detail?.app.id);
-  const activeRelease = detail?.releases.find((release) => release.status === 'active');
-  const previewRelease = detail?.releases.find((release) => release.status === 'preview');
-  const latestBuild = detail?.builds[0];
-  const roles = useMemo(() => detail?.policies[0] ? Object.entries(detail.policies[0].grants) : [], [detail]);
-  const specificationCurrent = detail ? detail.app.generatedFromSpecRevision === detail.app.specRevision : true;
-  const previewUrl = previewRelease?.previewToken && app ? `${app.url}?preview=${encodeURIComponent(previewRelease.id)}&token=${encodeURIComponent(previewRelease.previewToken)}` : undefined;
+  useEffect(() => { void loadLibrary(); }, []);
+  useEffect(() => {
+    if (!detail || !generationJob || !['queued', 'running'].includes(generationJob.status)) return;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const next = await api.browserGenerationJob(detail.app.id, generationJob.id);
+        if (stopped) return;
+        setGenerationJob(next);
+        if (!['queued', 'running'].includes(next.status)) await refreshApplication();
+      } catch (reason) { if (!stopped) setError(reason instanceof Error ? reason.message : 'Unable to read build progress'); }
+    };
+    const timer = window.setInterval(() => void poll(), 800);
+    void poll();
+    return () => { stopped = true; window.clearInterval(timer); };
+  }, [detail?.app.id, generationJob?.id, generationJob?.status]);
 
-  async function generate() {
-    if (!app || !generationProfile || busy) return;
-    setBusy('generate'); setNotice(undefined);
+  async function openApplication(appId: string, nextArea: WorkspaceArea = 'define') {
+    setError(undefined); setNotice(undefined);
     try {
-      const result = await api.generateBrowserApp(app.id, instruction, generationProfile);
-      setDetail(result.detail);
-      setGenerationProfile(result.detail.app.generationProfile ?? generationProfile);
-      setApps(await api.browserApps());
-      const team = result.plan.workers.map((worker) => worker.name).join(' + ');
-      setNotice(`${result.plan.agent === 'oneringai' ? team : 'Safe fallback'} prepared source revision ${result.detail.app.sourceRevision} for preview after ${result.attempts ?? 1} verification attempt${(result.attempts ?? 1) === 1 ? '' : 's'}: ${result.plan.headline}`);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Generation failed'); }
-    finally { setBusy(undefined); }
-  }
-
-  async function selectApp(appId: string) {
-    setSelectedAppId(appId); setError(undefined); setNotice(undefined);
-    try {
-      const next = await api.browserApp(appId); setDetail(next); setRequirements(structuredClone(next.specification.sections)); setStructure(structuredClone(next.specification.structure)); setSelectedModule(next.modules[0]);
+      const [next, latest] = await Promise.all([api.browserApp(appId), api.latestBrowserGenerationJob(appId)]);
+      setDetail(next);
+      setGenerationJob(latest);
       if (generationOptions) setGenerationProfile(profileForApp(next, generationOptions));
+      setArea(nextArea);
+      setShowLibrary(false);
     } catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to open application'); }
   }
 
-  async function createApp(event: React.FormEvent) {
+  async function refreshApplication() {
+    if (!detail) return;
+    const [next, list] = await Promise.all([api.browserApp(detail.app.id), api.browserApps()]);
+    setDetail(next);
+    setApps(list);
+    if (generationOptions) setGenerationProfile(profileForApp(next, generationOptions));
+  }
+
+  async function createApplication(event: React.FormEvent) {
     event.preventDefault();
-    if (busy || !newApp.name.trim() || !newApp.description.trim()) return;
+    if (!newApp.name.trim() || !newApp.description.trim() || busy) return;
     setBusy('create'); setError(undefined);
     try {
-      const result = await api.createBrowserApp(newApp);
-      const list = await api.browserApps(); setApps(list); setDetail(result.detail); setSelectedAppId(result.detail.app.id);
+      const result = await api.createBrowserApp({ name: newApp.name, description: newApp.description, mode: newApp.profile.tenancyMode, profile: newApp.profile });
+      setDetail(result.detail);
       if (generationOptions) setGenerationProfile(profileForApp(result.detail, generationOptions));
-      setSelectedModule(result.detail.modules[0]); setRequirements(structuredClone(result.detail.specification.sections)); setStructure(structuredClone(result.detail.specification.structure)); setShowCreate(false); setNewApp({ name: '', description: '', mode: 'team' });
-      setNotice(`${result.detail.app.name} was created and published with an isolated application graph.`);
+      setApps(await api.browserApps());
+      setGenerationJob(undefined);
+      setShowCreate(false);
+      setShowLibrary(false);
+      setArea('define');
+      setNewApp({ name: '', description: '', profile: defaultApplicationProfile() });
     } catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to create application'); }
     finally { setBusy(undefined); }
   }
 
-  async function saveRequirements() {
-    if (!detail || !structure || busy) return;
-    setBusy('build'); setError(undefined); setNotice(undefined);
+  async function confirmDefinition() {
+    if (!detail || busy) return;
+    if (detail.app.specificationApprovalStatus === 'approved') { setArea('build'); return; }
+    setBusy('confirm'); setError(undefined);
     try {
-      const result = await api.reviseBrowserAppSpecification(detail.app.id, detail.specification.revision, requirements, structure);
-      setDetail(result.detail); setRequirements(structuredClone(result.detail.specification.sections)); setStructure(structuredClone(result.detail.specification.structure));
-      setNotice(`Living specification revision ${result.detail.specification.revision} is authoritative. The current source is now marked for regeneration.`);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to save requirements'); }
+      const result = await api.approveBrowserAppSpecification(detail.app.id);
+      setDetail(result.detail);
+      setApps(await api.browserApps());
+      setArea('build');
+      setNotice(`Specification v${result.detail.app.specRevision} is confirmed. The build team will use exactly this definition.`);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to confirm the application definition'); }
     finally { setBusy(undefined); }
   }
 
-  async function build() {
-    if (!app || busy) return;
-    setBusy('build'); setNotice(undefined);
-    try {
-      const result = await api.buildBrowserApp(app.id);
-      setDetail(result.detail);
-      setNotice(`Preview ${result.detail.releases.find((release) => release.status === 'preview')?.version ?? result.detail.releases[0]?.version} passed every admission gate. Production is unchanged until promotion.`);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Build failed'); }
+  async function generate() {
+    if (!detail || !generationProfile || busy) return;
+    setBusy('generate'); setError(undefined); setNotice(undefined);
+    try { setGenerationJob(await api.generateBrowserApp(detail.app.id, instruction, generationProfile)); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to start the build'); }
     finally { setBusy(undefined); }
+  }
+
+  async function cancelGeneration() {
+    if (!detail || !generationJob || !['queued', 'running'].includes(generationJob.status)) return;
+    try { setGenerationJob(await api.cancelBrowserGenerationJob(detail.app.id, generationJob.id)); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to cancel the build'); }
   }
 
   async function promotePreview() {
-    if (!app || !previewRelease || busy) return;
-    setBusy('build'); setError(undefined); setNotice(undefined);
+    const preview = detail?.releases.find((release) => release.status === 'preview');
+    if (!detail || !preview || busy) return;
+    setBusy('promote'); setError(undefined);
     try {
-      const result = await api.promoteBrowserAppRelease(app.id, previewRelease.id);
-      setDetail(result.detail); setApps(await api.browserApps());
-      setNotice(`Release ${result.detail.releases.find((release) => release.status === 'active')?.version} is now active. The exact verified preview artifact was promoted without rebuilding.`);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Release promotion failed'); }
+      const result = await api.promoteBrowserAppRelease(detail.app.id, preview.id);
+      setDetail(result.detail);
+      setApps(await api.browserApps());
+      setNotice('The exact reviewed preview is now the production application.');
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to publish the preview'); }
     finally { setBusy(undefined); }
   }
 
-  async function addDomain() {
-    if (!app || !domain.trim()) return;
-    setBusy('build'); setNotice(undefined);
+  async function addDomain(event: React.FormEvent) {
+    event.preventDefault();
+    if (!detail || !domain.trim() || busy) return;
+    setBusy('domain'); setError(undefined);
     try {
-      const binding = await api.createBrowserAppBinding(app.id, domain.trim(), 'custom_hostname');
-      const verified = binding.verificationToken
-        ? await api.verifyBrowserAppBinding(app.id, binding.id, binding.verificationToken)
-        : binding;
-      await load();
-      setNotice(`Verified ${verified.hostname}; the active release now resolves on this hostname.`);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Domain binding failed'); }
+      const binding = await api.createBrowserAppBinding(detail.app.id, domain.trim(), 'custom_hostname');
+      if (binding.verificationToken) await api.verifyBrowserAppBinding(detail.app.id, binding.id, binding.verificationToken);
+      await refreshApplication();
+      setDomain('');
+      setNotice('Custom hostname added and verified for local development.');
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to add hostname'); }
     finally { setBusy(undefined); }
-  }
-
-  function addSpecifiedPage() {
-    if (!structure) return;
-    let suffix = structure.pages.length + 1;
-    while (structure.pages.some((page) => page.id === `page-new-${suffix}`)) suffix += 1;
-    const id = `page-new-${suffix}`;
-    setStructure({
-      ...structure,
-      pages: [...structure.pages, {
-        id, name: `New page ${suffix}`, path: `/new-page-${suffix}`, purpose: 'Describe what this page enables for its users.',
-        public: false, roleIds: ['viewer', 'editor', 'admin'], states: ['loading', 'empty', 'error', 'forbidden', 'ready'],
-        entityIds: [], workflowIds: [], agentIds: [], acceptanceCriterionIds: [],
-      }],
-    });
-  }
-
-  function addSpecifiedEntity() {
-    if (!structure) return;
-    let suffix = structure.entities.length + 1;
-    while (structure.entities.some((entity) => entity.id === `entity-${suffix}`)) suffix += 1;
-    setStructure({
-      ...structure,
-      entities: [...structure.entities, {
-        id: `entity-${suffix}`, name: `Entity ${suffix}`, description: 'Describe the records people manage.',
-        fields: [{ id: 'name', type: 'string', required: true, description: 'Human-readable name.' }],
-      }],
-    });
-  }
-
-  function addSpecifiedAgent() {
-    if (!structure) return;
-    let suffix = structure.agents.length + 1;
-    while (structure.agents.some((agent) => agent.id === `agent-${suffix}`)) suffix += 1;
-    setStructure({
-      ...structure,
-      agents: [...structure.agents, {
-        id: `agent-${suffix}`, name: `Agent ${suffix}`, purpose: 'Help the user complete one bounded browser workflow.',
-        connector: 'openai-main', model: 'gpt-5.4-mini', toolIds: [], maximumIterations: 4, humanApprovalRequired: false,
-      }],
-    });
-  }
-
-  function addSpecifiedWorkflow() {
-    if (!structure) return;
-    let suffix = structure.workflows.length + 1;
-    while (structure.workflows.some((workflow) => workflow.id === `workflow-${suffix}`)) suffix += 1;
-    setStructure({
-      ...structure,
-      workflows: [...structure.workflows, {
-        id: `workflow-${suffix}`, name: `Workflow ${suffix}`, description: 'Describe the outcome of this browser workflow.',
-        trigger: 'The user starts this workflow.', steps: [{ id: 'start', type: 'browser_action', description: 'Collect the required user input.' }],
-      }],
-      pages: structure.pages.map((page, index) => index === 0 ? { ...page, workflowIds: [...page.workflowIds, `workflow-${suffix}`] } : page),
-    });
   }
 
   function updateGenerationAgent(index: number, patch: Partial<BrowserGenerationAgentConfiguration>) {
     if (!generationProfile) return;
-    setGenerationProfile({
-      ...generationProfile,
-      agents: generationProfile.agents.map((agent, agentIndex) => agentIndex === index ? { ...agent, ...patch } : agent),
-    });
+    setGenerationProfile({ ...generationProfile, agents: generationProfile.agents.map((agent, candidate) => candidate === index ? { ...agent, ...patch } : agent) });
   }
 
-  function selectGenerationTemplate(index: number, templateId: string) {
-    const template = generationOptions?.agents.find((candidate) => candidate.id === templateId);
-    if (template) updateGenerationAgent(index, structuredClone(template.defaultConfiguration));
+  function chooseApplicationType(type: ApplicationType) {
+    setNewApp((current) => ({ ...current, profile: defaultApplicationProfile(type, current.profile.tenancyMode) }));
   }
 
-  function selectGenerationConnector(index: number, connectorId: string) {
-    const connector = generationOptions?.connectors.find((candidate) => candidate.id === connectorId);
-    if (!connector) return;
-    const model = connector.models.find((candidate) => candidate.preferred)?.id ?? connector.models[0]?.id;
-    if (model) updateGenerationAgent(index, { connector: connector.id, model });
+  function chooseTenancy(mode: AppTenancyMode) {
+    setNewApp((current) => ({ ...current, profile: { ...current.profile, tenancyMode: mode, identityMode: mode === 'personal' ? 'private' : 'public_and_authenticated' } }));
   }
 
-  function addGenerationAgent() {
-    if (!generationOptions || !generationProfile || generationProfile.agents.length >= generationOptions.maximumAgents) return;
-    const used = new Set(generationProfile.agents.map((agent) => agent.templateId));
-    const template = generationOptions.agents.find((candidate) => !used.has(candidate.id));
-    if (template) setGenerationProfile({ ...generationProfile, agents: [...generationProfile.agents, structuredClone(template.defaultConfiguration)] });
-  }
+  const activeRelease = detail?.releases.find((release) => release.status === 'active');
+  const previewRelease = detail?.releases.find((release) => release.status === 'preview');
+  const previewUrl = detail && previewRelease?.previewToken ? `${detail.app.url}?preview=${encodeURIComponent(previewRelease.id)}&token=${encodeURIComponent(previewRelease.previewToken)}` : undefined;
+  const generator = detail && generators.find((candidate) => candidate.id === detail.app.generatorId);
+  const generationActive = Boolean(generationJob && ['queued', 'running'].includes(generationJob.status));
+  const latestBuild = detail?.builds[0];
+  const connectorById = useMemo(() => new Map(generationOptions?.connectors.map((item) => [item.id, item]) ?? []), [generationOptions]);
 
-  function removeGenerationAgent(index: number) {
-    if (!generationProfile || generationProfile.agents.length <= 1) return;
-    setGenerationProfile({ ...generationProfile, agents: generationProfile.agents.filter((_, agentIndex) => agentIndex !== index) });
-  }
+  const createDialog = showCreate && <div className="simple-creator-backdrop"><form className="simple-creator" onSubmit={createApplication}>
+    <header><div><span>NEW APPLICATION</span><strong>What would you like to build?</strong><p>Start with the shape and outcome. The interview will work out everything else with you.</p></div>{apps.length > 0 && <button type="button" aria-label="Close application creator" onClick={() => setShowCreate(false)}><X/></button>}</header>
+    <div className="simple-creator-fields"><label><span>Name</span><input aria-label="Application name" autoFocus placeholder="Customer research hub" value={newApp.name} onChange={(event) => setNewApp({ ...newApp, name: event.target.value })}/></label><label><span>What should people accomplish?</span><textarea aria-label="Desired outcome" placeholder="Describe the outcome in plain language…" value={newApp.description} onChange={(event) => setNewApp({ ...newApp, description: event.target.value })}/></label></div>
+    <fieldset><legend>Application type</legend><div className="simple-choice-grid">{applicationTypes.map(([id, name, description]) => <button type="button" key={id} className={newApp.profile.applicationType === id ? 'selected' : ''} onClick={() => chooseApplicationType(id)}><strong>{name}</strong><small>{description}</small></button>)}</div></fieldset>
+    <fieldset><legend>Who will use it?</legend><div className="tenancy-choice-row">{tenancyChoices.map(([id, name, description]) => <button type="button" key={id} className={newApp.profile.tenancyMode === id ? 'selected' : ''} onClick={() => chooseTenancy(id)}><strong>{name}</strong><small>{description}</small></button>)}</div></fieldset>
+    <footer><span><Sparkles/> Identity, data sensitivity, workflows, and agent needs will be discovered with you.</span><button disabled={!newApp.name.trim() || !newApp.description.trim() || Boolean(busy)}>{busy === 'create' ? <LoaderCircle className="spin"/> : <Plus/>} Start interview</button></footer>
+  </form></div>;
 
-  const createForm = showCreate && <form onSubmit={createApp}><input aria-label="New app name" placeholder="Application name" value={newApp.name} onChange={(event) => setNewApp({ ...newApp, name: event.target.value })}/><input aria-label="New app description" placeholder="What does it help people do?" value={newApp.description} onChange={(event) => setNewApp({ ...newApp, description: event.target.value })}/><select aria-label="New app audience" value={newApp.mode} onChange={(event) => setNewApp({ ...newApp, mode: event.target.value as AppTenancyMode })}><option value="personal">Personal</option><option value="team">Team</option><option value="multi_organization">Multi-organization</option></select><button disabled={Boolean(busy)}>{busy === 'create' ? <LoaderCircle className="spin" /> : <Plus />} Create & publish</button></form>;
+  if (!loaded) return <div className="browser-empty"><LoaderCircle className="spin"/><h2>Loading applications…</h2></div>;
 
-  if (error && !detail) return <div className="browser-empty"><ShieldCheck /><h2>Browser app runtime unavailable</h2><p>{error}</p><button onClick={() => void load()}>Retry connection</button></div>;
-  if (loaded && !apps.length) return <div className="browser-empty"><Box /><h2>Create the first app in this Mongo-backed workspace</h2><p>This platform organization owns its apps, releases, end tenants, and runtime data.</p><section className="app-switcher-bar empty-app-creator"><button onClick={() => setShowCreate((value) => !value)}><Plus /> New app</button>{createForm}</section></div>;
-  if (!detail || !app) return <div className="browser-empty"><LoaderCircle className="spin" /><h2>Loading Mongo-native application graph</h2></div>;
+  if (showLibrary || !detail) return <div className="application-library">
+    <header className="application-library-heading"><div><span>APPLICATIONS</span><h2>What are you building?</h2><p>Start something new or continue an existing application.</p></div><button onClick={() => setShowCreate(true)}><Plus/> New application</button></header>
+    {error && <div className="browser-error"><CircleAlert/>{error}</div>}
+    {apps.length ? <div className="application-card-grid">{apps.map((app) => <article key={app.id}>
+      <div className="application-card-icon"><Sparkles/></div><div className="application-card-status"><i className={app.lifecycleStatus}/>{app.lifecycleStatus.replaceAll('_', ' ')}</div>
+      <h3>{app.name}</h3><p>{app.description}</p>
+      <div className="application-card-meta"><span>{app.profile.applicationType.replaceAll('_', ' ')}</span><span>{tenancyChoices.find(([id]) => id === app.profile.tenancyMode)?.[1]}</span><span>spec v{app.specRevision}</span></div>
+      <footer><button onClick={() => void openApplication(app.id, app.lifecycleStatus === 'draft' || app.lifecycleStatus === 'specifying' ? 'define' : 'review')}>{app.lifecycleStatus === 'draft' || app.lifecycleStatus === 'specifying' ? <FileText/> : <Play/>}{app.lifecycleStatus === 'draft' || app.lifecycleStatus === 'specifying' ? 'Continue interview' : 'Open application'}</button>{app.release && <a href={app.url} target="_blank" rel="noreferrer" aria-label={`Open ${app.name} production`}><ExternalLink/></a>}</footer>
+    </article>)}</div> : <div className="application-library-empty"><Sparkles/><h3>Your first application starts with a conversation</h3><p>No schemas or technical forms required.</p><button onClick={() => setShowCreate(true)}><Plus/> Start an application</button></div>}
+    {createDialog}
+  </div>;
 
-  return <div className="browser-studio">
-    <section className="app-switcher-bar">
-      <label><span>Browser application</span><select value={detail.app.id} onChange={(event) => void selectApp(event.target.value)}>{apps.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.tenancyMode.replaceAll('_', ' ')}</option>)}</select></label>
-      <button onClick={() => setShowCreate((value) => !value)}><Plus /> New app</button>
-      {createForm}
-    </section>
-    <section className="browser-hero">
-      <div className="browser-hero-copy"><div className="mode-kicker"><Sparkles size={13} /> BROWSER-NATIVE · MONGO DATA · CLIENT AGENTS</div><h2>{app.name}</h2><p>{app.description}</p><div className="browser-meta"><span><Check size={13} /> MongoDB connected</span><span><Check size={13} /> Production {activeRelease?.version ?? 'not promoted'}</span><span className={specificationCurrent ? '' : 'browser-meta-warning'}>{specificationCurrent ? <Check size={13} /> : <CircleAlert size={13} />} Spec v{detail.app.specRevision} {specificationCurrent ? 'implemented' : 'needs generation'}</span><span><Check size={13} /> {detail.tenancy.mode === 'personal' ? 'Personal' : detail.tenancy.mode === 'team' ? 'Team workspace' : `${detail.endTenants.length} organizations`}</span><span><Check size={13} /> No app server</span></div></div>
-      <div className="browser-hero-actions">{activeRelease && <a className="launch-app" href={app.url} target="_blank" rel="noreferrer"><Play size={16} fill="currentColor" /> Open production <ExternalLink size={14} /></a>}{previewUrl && <a className="launch-app launch-app--preview" href={previewUrl} target="_blank" rel="noreferrer"><Play size={16} /> Review preview <ExternalLink size={14} /></a>}{previewRelease && <button className="promote-preview" onClick={() => void promotePreview()} disabled={Boolean(busy)}><Check size={15} /> Promote verified preview</button>}<button onClick={() => void build()} disabled={Boolean(busy)}>{busy === 'build' ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />} Verify new preview</button></div>
-    </section>
+  return <div className="simple-application-workspace">
+    <header className="simple-workspace-header"><button className="back-to-apps" onClick={() => setShowLibrary(true)}><ArrowLeft/> Applications</button><div><span>{detail.app.profile.applicationType.replaceAll('_', ' ')}</span><strong>{detail.app.name}</strong></div><nav>{([
+      ['define', 'Define', FileText], ['build', 'Build', Rocket], ['review', 'Preview', Play], ['settings', 'Settings', Settings],
+    ] as Array<[WorkspaceArea, string, typeof FileText]>).map(([id, label, Icon]) => <button key={id} className={area === id ? 'active' : ''} onClick={() => setArea(id)}><Icon/>{label}{id === 'build' && generationActive && <i/>}</button>)}</nav>{activeRelease && <a href={detail.app.url} target="_blank" rel="noreferrer">Open production <ExternalLink/></a>}</header>
 
-    <section className="browser-stats">
-      <article><Code2 /><div><strong>{detail.modules.length}</strong><span>versioned modules</span></div></article>
-      <article><Route /><div><strong>{detail.routes.length}</strong><span>browser routes</span></div></article>
-      <article><Database /><div><strong>{detail.schemas.length}</strong><span>secured entities</span></div></article>
-      <article><ShieldCheck /><div><strong>{roles.length}</strong><span>standard roles</span></div></article>
-      <article><Braces /><div><strong>{latestBuild?.tests ?? 0}</strong><span>release checks</span></div></article>
-    </section>
+    {notice && <div className="simple-notice"><Check/>{notice}</div>}
+    {error && <div className="browser-error"><CircleAlert/>{error}<button aria-label="Dismiss error" onClick={() => setError(undefined)}><X/></button></div>}
 
-    <section className="agent-generation-card">
-      <div className="agent-generation-heading">
-        <div className="agent-orb"><Sparkles /></div>
-        <div className="agent-generation-copy"><span>ONERINGAI GENERATION TEAM</span><strong>Choose who builds the next traceable revision</strong><p>Each specialist runs through the selected connector and model. The server validates the configuration, keeps credentials outside the browser, and pins the exact team to the resulting preview.</p></div>
-        {generationOptions && generationProfile && <button className="add-generation-agent" onClick={addGenerationAgent} disabled={generationProfile.agents.length >= generationOptions.maximumAgents || Boolean(busy)}><Plus /> Add specialist</button>}
-      </div>
-      {generationOptions && generationProfile ? <div className="generation-team" aria-label="Generation team">
-        {generationProfile.agents.map((worker, index) => {
-          const connector = generationOptions.connectors.find((candidate) => candidate.id === worker.connector);
-          const configuredConnectorExists = generationOptions.connectors.some((candidate) => candidate.configured);
-          return <article className="generation-worker" key={`${worker.templateId}-${index}`}>
-            <span className="generation-worker-index"><Bot />{index + 1}</span>
-            <label><span>Specialist</span><select aria-label={`Generation specialist ${index + 1}`} value={worker.templateId} onChange={(event) => selectGenerationTemplate(index, event.target.value)}>{generationOptions.agents.map((candidate) => <option key={candidate.id} value={candidate.id} disabled={generationProfile.agents.some((selected, selectedIndex) => selectedIndex !== index && selected.templateId === candidate.id)}>{candidate.name} · {candidate.stage}</option>)}</select><small>{worker.role}</small></label>
-            <label><span>Connector</span><select aria-label={`${worker.name} connector`} value={worker.connector} onChange={(event) => selectGenerationConnector(index, event.target.value)}>{generationOptions.connectors.map((candidate) => <option key={candidate.id} value={candidate.id} disabled={configuredConnectorExists && !candidate.configured}>{candidate.name}{candidate.configured ? '' : ' · unavailable'}</option>)}</select><small>{connector?.configured ? 'Credential available' : 'Fallback only'}</small></label>
-            <label><span>Model</span><select aria-label={`${worker.name} model`} value={worker.model} onChange={(event) => updateGenerationAgent(index, { model: event.target.value })}>{connector?.models.map((model) => <option key={model.id} value={model.id} title={model.description}>{model.name}{model.preferred ? ' · preferred' : ''}</option>)}</select><small>{connector?.vendor ?? 'Provider model'}</small></label>
-            <label><span>Reasoning effort</span><select aria-label={`${worker.name} reasoning effort`} value={worker.effort} onChange={(event) => updateGenerationAgent(index, { effort: event.target.value as GenerationEffort })}>{generationOptions.efforts.map((effort) => <option key={effort.id} value={effort.id} title={effort.description}>{effort.name}</option>)}</select><small>{generationOptions.efforts.find((effort) => effort.id === worker.effort)?.description}</small></label>
-            <button className="remove-generation-agent" aria-label={`Remove ${worker.name}`} title="Remove specialist" onClick={() => removeGenerationAgent(index)} disabled={generationProfile.agents.length <= 1 || Boolean(busy)}><Trash2 /></button>
-          </article>;
-        })}
-      </div> : <div className="generation-options-loading"><LoaderCircle className="spin" /> Loading generation capabilities…</div>}
-      <div className="agent-generation-form"><input aria-label="Generation instruction" value={instruction} onChange={(event) => setInstruction(event.target.value)} /><button onClick={() => void generate()} disabled={Boolean(busy) || !generationProfile}>{busy === 'generate' ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />} Generate preview</button></div>
-    </section>
-    {notice && <div className="browser-notice"><Check size={16} />{notice}</div>}
-    {error && <div className="browser-error">{error}</div>}
+    {area === 'define' && <ApplicationDiscovery appId={detail.app.id} appName={detail.app.name} specification={detail.specification} options={generationOptions} approved={detail.app.specificationApprovalStatus === 'approved'} confirming={busy === 'confirm'} onSpecificationUpdated={refreshApplication} onConfirm={confirmDefinition} onError={setError}/>}
 
-    <section className="browser-workbench">
-      <aside className="workbench-nav">{panels.map((item) => <button key={item.id} className={panel === item.id ? 'active' : ''} onClick={() => setPanel(item.id)}><item.icon size={16} />{item.label}<span>{item.id === 'requirements' ? detail.specification.revision : item.id === 'pages' ? detail.specification.structure.pages.length : item.id === 'workflows' ? detail.specification.structure.workflows.length : item.id === 'tenancy' ? detail.tenancy.revision : item.id === 'design' ? detail.app.themeRevision : item.id === 'modules' ? detail.modules.length : item.id === 'routes' ? detail.routes.length : item.id === 'data' ? detail.schemas.length : item.id === 'security' ? roles.length : item.id === 'agents' ? detail.agents.length : item.id === 'evidence' ? latestBuild?.checks.length ?? 0 : detail.connectors.length}</span></button>)}</aside>
-      <div className="workbench-content">
-        {panel === 'requirements' && structure && <div className="requirements-editor"><div className="workbench-heading"><div><span>Authoritative application specification</span><small>Saving a revision marks generated source as outdated until a verified graph revision implements it.</small></div><button onClick={() => void saveRequirements()} disabled={Boolean(busy)}>{busy ? <LoaderCircle className="spin" /> : <Save />} Save specification</button></div><article className="spec-purpose"><label>Application purpose<textarea value={structure.purpose} onChange={(event) => setStructure({ ...structure, purpose: event.target.value })}/></label><div className="spec-contract-summary"><span>{structure.pages.length} pages</span><span>{structure.entities.length} entities</span><span>{structure.workflows.length} workflows</span><span>{structure.agents.length} agents</span><span>{structure.acceptanceCriteria.length} acceptance criteria</span></div></article>{requirements.map((section, index) => <article key={section.id}><label>Stable ID<input value={section.id} disabled /></label><label>Section title<input value={section.title} onChange={(event) => setRequirements(requirements.map((item, itemIndex) => itemIndex === index ? { ...item, title: event.target.value } : item))}/></label><label>Requirement<textarea value={section.body} onChange={(event) => setRequirements(requirements.map((item, itemIndex) => itemIndex === index ? { ...item, body: event.target.value } : item))}/></label></article>)}<div className="acceptance-list"><div className="workbench-heading"><span>Executable acceptance contract</span><small>Every criterion references a stable requirement ID.</small></div>{structure.acceptanceCriteria.map((criterion) => <article key={criterion.id}><strong>{criterion.description}</strong><span>{criterion.kind}</span><code>{criterion.requirementId}</code></article>)}</div></div>}
-        {panel === 'pages' && structure && <div className="page-spec-grid"><div className="workbench-heading"><div><span>Pages are independent specification nodes</span><small>Routes, states, roles, data, workflows and agents remain traceable separately.</small></div><button onClick={addSpecifiedPage}><Plus /> Add page</button></div>{structure.pages.map((page, index) => <article key={page.id}><div><span className="definition-icon"><Route /></span><div><small>{page.id}</small><input aria-label={`${page.name} page name`} value={page.name} onChange={(event) => setStructure({ ...structure, pages: structure.pages.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) })}/></div><input aria-label={`${page.name} page path`} value={page.path} onChange={(event) => setStructure({ ...structure, pages: structure.pages.map((item, itemIndex) => itemIndex === index ? { ...item, path: event.target.value } : item) })}/></div><label>Purpose<textarea value={page.purpose} onChange={(event) => setStructure({ ...structure, pages: structure.pages.map((item, itemIndex) => itemIndex === index ? { ...item, purpose: event.target.value } : item) })}/></label><div className="page-state-list">{page.states.map((state) => <span key={state}>{state}</span>)}</div><div className="spec-reference-groups"><label>Data used on this page<div className="spec-reference-list">{structure.entities.map((entity) => <button key={entity.id} type="button" className={page.entityIds.includes(entity.id) ? 'selected' : ''} onClick={() => setStructure({ ...structure, pages: structure.pages.map((item, itemIndex) => itemIndex === index ? { ...item, entityIds: item.entityIds.includes(entity.id) ? item.entityIds.filter((id) => id !== entity.id) : [...item.entityIds, entity.id] } : item) })}>{entity.name}</button>)}</div></label><label>Browser agents used<div className="spec-reference-list">{structure.agents.map((agent) => <button key={agent.id} type="button" className={page.agentIds.includes(agent.id) ? 'selected' : ''} onClick={() => setStructure({ ...structure, pages: structure.pages.map((item, itemIndex) => itemIndex === index ? { ...item, agentIds: item.agentIds.includes(agent.id) ? item.agentIds.filter((id) => id !== agent.id) : [...item.agentIds, agent.id] } : item) })}>{agent.name}</button>)}</div></label></div><small>{page.roleIds.join(' · ')} · {page.entityIds.length} entities · {page.agentIds.length} agents</small>{structure.pages.length > 1 && <button className="remove-page" onClick={() => setStructure({ ...structure, pages: structure.pages.filter((item) => item.id !== page.id) })}>Remove page from next specification</button>}</article>)}</div>}
-        {panel === 'workflows' && structure && <div className="workflow-spec-editor"><div className="workbench-heading"><div><span>Browser workflow contracts</span><small>Each step declares where work runs: browser UI, secure data gateway, browser-owned agent loop, decision, or human approval.</small></div><button onClick={addSpecifiedWorkflow}><Plus /> Add workflow</button></div>{structure.workflows.map((workflow, workflowIndex) => <article key={workflow.id}><div className="workflow-spec-title"><div><small>{workflow.id}</small><input aria-label={`${workflow.id} name`} value={workflow.name} onChange={(event) => setStructure({ ...structure, workflows: structure.workflows.map((item, index) => index === workflowIndex ? { ...item, name: event.target.value } : item) })}/></div><input aria-label={`${workflow.id} trigger`} value={workflow.trigger} onChange={(event) => setStructure({ ...structure, workflows: structure.workflows.map((item, index) => index === workflowIndex ? { ...item, trigger: event.target.value } : item) })}/></div><label>Outcome<textarea value={workflow.description} onChange={(event) => setStructure({ ...structure, workflows: structure.workflows.map((item, index) => index === workflowIndex ? { ...item, description: event.target.value } : item) })}/></label><div className="workflow-step-editor">{workflow.steps.map((step, stepIndex) => <div key={step.id}><input aria-label={`${workflow.id} step ${stepIndex + 1} ID`} value={step.id} onChange={(event) => setStructure({ ...structure, workflows: structure.workflows.map((item, index) => index === workflowIndex ? { ...item, steps: item.steps.map((candidate, candidateIndex) => candidateIndex === stepIndex ? { ...candidate, id: event.target.value } : candidate) } : item) })}/><select value={step.type} onChange={(event) => setStructure({ ...structure, workflows: structure.workflows.map((item, index) => index === workflowIndex ? { ...item, steps: item.steps.map((candidate, candidateIndex) => candidateIndex === stepIndex ? { ...candidate, type: event.target.value as typeof step.type } : candidate) } : item) })}>{['browser_action', 'data_read', 'data_write', 'agent', 'decision', 'human_approval'].map((type) => <option key={type}>{type}</option>)}</select><input aria-label={`${step.id} description`} value={step.description} onChange={(event) => setStructure({ ...structure, workflows: structure.workflows.map((item, index) => index === workflowIndex ? { ...item, steps: item.steps.map((candidate, candidateIndex) => candidateIndex === stepIndex ? { ...candidate, description: event.target.value } : candidate) } : item) })}/>{workflow.steps.length > 1 && <button type="button" onClick={() => setStructure({ ...structure, workflows: structure.workflows.map((item, index) => index === workflowIndex ? { ...item, steps: item.steps.filter((_, candidateIndex) => candidateIndex !== stepIndex) } : item) })}>Remove</button>}</div>)}</div><div className="entity-spec-actions"><button type="button" onClick={() => setStructure({ ...structure, workflows: structure.workflows.map((item, index) => index === workflowIndex ? { ...item, steps: [...item.steps, { id: `step-${item.steps.length + 1}`, type: 'browser_action', description: 'Describe this step.' }] } : item) })}><Plus /> Add step</button><button type="button" className="remove-page" onClick={() => setStructure({ ...structure, workflows: structure.workflows.filter((item) => item.id !== workflow.id), pages: structure.pages.map((page) => ({ ...page, workflowIds: page.workflowIds.filter((id) => id !== workflow.id) })) })}>Remove workflow</button></div></article>)}</div>}
-        {panel === 'tenancy' && <TenancyStudio detail={detail} onDetail={setDetail} onNotice={(message) => { setNotice(message); setError(undefined); }} onError={setError} />}
-        {panel === 'design' && <VisualDesignStudio detail={detail} onDetail={setDetail} onNotice={(message) => { setNotice(message); setError(undefined); }} onError={setError} />}
-        {panel === 'modules' && <div className="module-browser"><div className="module-list"><div className="workbench-heading"><span>Component graph</span><small>revision {detail.app.sourceRevision}</small></div>{detail.modules.map((item) => <button key={item.id} className={selectedModule?.id === item.id ? 'active' : ''} onClick={() => setSelectedModule(item)}><span className={`module-kind kind-${item.kind}`}>{item.kind}</span><strong>{item.name}</strong><small>{item.description}</small><i>{item.contentHash.slice(0, 8)}</i><em>{item.requirementIds.join(' · ')}</em></button>)}</div><div className="source-view"><div><span><GitBranch size={14} /> app://module/{selectedModule?.id}</span><small>immutable · TSX · requirements {selectedModule?.requirementIds.join(', ')}</small></div><pre>{selectedModule?.source}</pre></div></div>}
-        {panel === 'routes' && <div className="definition-grid">{detail.routes.map((route) => <article key={route.id}><span className="definition-icon"><Route /></span><div><small>{route.public ? 'PUBLIC ROUTE' : 'PROTECTED ROUTE'}</small><strong>{route.path}</strong><p>Renders <code>app://module/{route.pageModuleId}</code></p></div><span className="definition-status">BrowserRouter</span></article>)}<article className="route-binding-card"><span className="definition-icon"><Globe2 /></span><div><small>ACTIVE BINDINGS</small><strong>One release, multiple locations</strong>{detail.bindings.map((binding) => <p key={binding.id}>{binding.hostname}{binding.pathPrefix} · {binding.type.replaceAll('_', ' ')} · {binding.status}</p>)}<div className="domain-binding-form"><input value={domain} onChange={(event) => setDomain(event.target.value)} placeholder="app.customer.com"/><button onClick={() => void addDomain()} disabled={Boolean(busy)}>Add & verify local domain</button></div></div><span className="definition-status">build once</span></article></div>}
-        {panel === 'data' && structure && <div className="entity-spec-editor"><div className="workbench-heading"><div><span>Authoritative data model</span><small>Field changes compile into immutable Mongo schema and policy revisions. Physical collections remain server-derived.</small></div><button onClick={addSpecifiedEntity}><Plus /> Add entity</button></div>{structure.entities.map((entity, entityIndex) => <article key={entity.id}><div className="entity-spec-title"><div><small>{entity.id}</small><input aria-label={`${entity.id} entity name`} value={entity.name} onChange={(event) => setStructure({ ...structure, entities: structure.entities.map((item, index) => index === entityIndex ? { ...item, name: event.target.value } : item) })}/></div><input aria-label={`${entity.id} entity description`} value={entity.description} onChange={(event) => setStructure({ ...structure, entities: structure.entities.map((item, index) => index === entityIndex ? { ...item, description: event.target.value } : item) })}/></div><div className="entity-field-editor">{entity.fields.map((field, fieldIndex) => <div key={field.id}><input aria-label={`${entity.id} field ${fieldIndex + 1} ID`} value={field.id} onChange={(event) => setStructure({ ...structure, entities: structure.entities.map((item, index) => index === entityIndex ? { ...item, fields: item.fields.map((candidate, candidateIndex) => candidateIndex === fieldIndex ? { ...candidate, id: event.target.value } : candidate) } : item) })}/><select aria-label={`${field.id} type`} value={field.type} onChange={(event) => setStructure({ ...structure, entities: structure.entities.map((item, index) => index === entityIndex ? { ...item, fields: item.fields.map((candidate, candidateIndex) => candidateIndex === fieldIndex ? { ...candidate, type: event.target.value as typeof field.type } : candidate) } : item) })}>{['string', 'number', 'boolean', 'date', 'enum', 'object', 'array'].map((type) => <option key={type}>{type}</option>)}</select><label><input type="checkbox" checked={field.required} onChange={(event) => setStructure({ ...structure, entities: structure.entities.map((item, index) => index === entityIndex ? { ...item, fields: item.fields.map((candidate, candidateIndex) => candidateIndex === fieldIndex ? { ...candidate, required: event.target.checked } : candidate) } : item) })}/> required</label>{entity.fields.length > 1 && <button type="button" onClick={() => setStructure({ ...structure, entities: structure.entities.map((item, index) => index === entityIndex ? { ...item, fields: item.fields.filter((_, candidateIndex) => candidateIndex !== fieldIndex) } : item) })}>Remove</button>}</div>)}</div><div className="entity-spec-actions"><button type="button" onClick={() => setStructure({ ...structure, entities: structure.entities.map((item, index) => index === entityIndex ? { ...item, fields: [...item.fields, { id: `field-${item.fields.length + 1}`, type: 'string', required: false, description: 'Describe this field.' }] } : item) })}><Plus /> Add field</button><button type="button" className="remove-page" onClick={() => setStructure({ ...structure, entities: structure.entities.filter((item) => item.id !== entity.id), pages: structure.pages.map((page) => ({ ...page, entityIds: page.entityIds.filter((id) => id !== entity.id) })) })}>Remove entity</button></div></article>)}<div className="workbench-heading generated-contract-heading"><div><span>Currently generated contracts</span><small>These are the immutable revisions served by the current editor graph.</small></div></div><div className="definition-grid">{detail.schemas.map((schema) => <article key={schema.id}><span className="definition-icon"><Database /></span><div><small>{schema.deploymentMode.replaceAll('_', ' ')}</small><strong>{schema.displayName}</strong><p>Logical entity <code>{schema.entity}</code></p><div className="field-chips">{Object.keys((schema.jsonSchema.properties ?? {}) as object).map((field) => <span key={field}>{field}</span>)}</div></div><span className="definition-status">{schema.indexes.length} indexes</span></article>)}</div></div>}
-        {panel === 'security' && <div className="role-matrix"><div className="workbench-heading"><span>Server-enforced role policy</span><small>UI hints never replace API authorization</small></div>{roles.map(([role, grant]) => <article key={role}><strong>{role}</strong><div>{['create','read','update','delete'].map((operation) => <span key={operation} className={grant.operations.includes(operation) ? 'allowed' : 'denied'}>{grant.operations.includes(operation) ? '✓' : '—'} {operation}</span>)}</div><small>{grant.writeFields.length ? `Writable: ${grant.writeFields.join(', ')}` : 'No writable fields'}</small></article>)}</div>}
-        {panel === 'agents' && structure && <div className="agent-spec-editor"><div className="workbench-heading"><div><span>Browser-agent contracts</span><small>The browser owns iteration, state, tool sequencing, checkpoints and approvals; the backend only gates model turns and tools.</small></div><button onClick={addSpecifiedAgent}><Plus /> Add agent</button></div>{structure.agents.map((agent, index) => <article key={agent.id}><div><small>{agent.id}</small><input aria-label={`${agent.id} name`} value={agent.name} onChange={(event) => setStructure({ ...structure, agents: structure.agents.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) })}/></div><label>Purpose<textarea value={agent.purpose} onChange={(event) => setStructure({ ...structure, agents: structure.agents.map((item, itemIndex) => itemIndex === index ? { ...item, purpose: event.target.value } : item) })}/></label><div className="agent-contract-fields"><label>OneRingAI connector<input value={agent.connector} onChange={(event) => setStructure({ ...structure, agents: structure.agents.map((item, itemIndex) => itemIndex === index ? { ...item, connector: event.target.value } : item) })}/></label><label>Model<input value={agent.model} onChange={(event) => setStructure({ ...structure, agents: structure.agents.map((item, itemIndex) => itemIndex === index ? { ...item, model: event.target.value } : item) })}/></label><label>Iteration budget<input type="number" min="1" max="12" value={agent.maximumIterations} onChange={(event) => setStructure({ ...structure, agents: structure.agents.map((item, itemIndex) => itemIndex === index ? { ...item, maximumIterations: Number(event.target.value) } : item) })}/></label><label className="approval-toggle"><input type="checkbox" checked={agent.humanApprovalRequired} onChange={(event) => setStructure({ ...structure, agents: structure.agents.map((item, itemIndex) => itemIndex === index ? { ...item, humanApprovalRequired: event.target.checked } : item) })}/> Require human approval</label></div><div className="field-chips">{agent.toolIds.length ? agent.toolIds.map((tool) => <span key={tool}>{tool}</span>) : <span>no tools · model-only loop</span>}</div><button className="remove-page" type="button" onClick={() => setStructure({ ...structure, agents: structure.agents.filter((item) => item.id !== agent.id), pages: structure.pages.map((page) => ({ ...page, agentIds: page.agentIds.filter((id) => id !== agent.id) })) })}>Remove agent</button></article>)}<div className="workbench-heading generated-contract-heading"><div><span>Generated runtime definitions</span><small>Tool IDs must resolve to allowlisted connector actions before release admission.</small></div></div><div className="definition-grid">{detail.agents.map((agent) => <article key={agent.id}><span className="definition-icon"><Sparkles /></span><div><small>BROWSER-OWNED LOOP · MAX {agent.maximumIterations} TURNS</small><strong>{agent.name}</strong><p>{agent.description}</p><div className="field-chips">{agent.allowedRoles.map((role) => <span key={role}>{role}</span>)}{agent.toolIds.map((tool) => <span key={tool}>{tool}</span>)}</div></div><span className="definition-status">{agent.connector}</span></article>)}</div></div>}
-        {panel === 'connectors' && <div className="definition-grid">{detail.connectors.map((connector) => <article key={connector.id}><span className="definition-icon"><Cable /></span><div><small>ONERINGAI CONNECTOR GRANT</small><strong>{connector.id} / {connector.action}</strong><p>{connector.description}</p><div className="field-chips">{connector.allowedRoles.map((role) => <span key={role}>{role}</span>)}</div></div><span className="definition-status">{connector.rateLimitPerMinute}/min</span></article>)}</div>}
-        {panel === 'evidence' && <div className="release-evidence"><div className="workbench-heading"><div><span>Release admission evidence</span><small>{latestBuild?.artifactDigest ?? 'No immutable artifact digest yet'}</small></div><span className={`evidence-status ${latestBuild?.status}`}>{latestBuild?.status ?? 'unknown'}</span></div>{latestBuild && <div className="acceptance-coverage"><strong>{latestBuild.acceptance.covered}/{latestBuild.acceptance.total}</strong><span>acceptance criteria traceably covered · spec v{latestBuild.specRevision}</span></div>}{latestBuild?.checks.map((check) => <article key={check.id}><span className={check.status}><Check /></span><div><strong>{check.label}</strong><p>{check.detail}</p></div><small>{check.durationMs} ms</small></article>)}</div>}
-      </div>
-    </section>
+    {area === 'build' && <section className="build-experience">
+      <header><div><span>BUILD APPLICATION</span><h2>Turn the confirmed definition into a working app</h2><p>The platform chooses a balanced specialist team by default. You can watch every meaningful stage and review the result before publishing.</p></div><div className={detail.app.specificationApprovalStatus === 'approved' ? 'build-ready' : 'build-not-ready'}>{detail.app.specificationApprovalStatus === 'approved' ? <Check/> : <CircleAlert/>}<span><strong>{detail.app.specificationApprovalStatus === 'approved' ? `Specification v${detail.app.specRevision} confirmed` : 'Definition not confirmed'}</strong><small>{generator?.name ?? 'No compatible generator'}</small></span></div></header>
+      {!generationJob || !generationActive && generationJob.status !== 'completed' ? <div className="build-launch-card"><div className="build-orb"><Sparkles/></div><div><strong>Build the complete experience</strong><p>Pages, MongoDB data contracts, workflows, visual design, browser agents, security boundaries, and acceptance evidence will be generated together.</p></div><button onClick={() => void generate()} disabled={Boolean(busy) || detail.app.specificationApprovalStatus !== 'approved' || !generator?.available}>{busy === 'generate' ? <LoaderCircle className="spin"/> : <Rocket/>} Build my app</button></div> : null}
+
+      {generationJob && <div className={`build-progress-card ${generationJob.status}`}>
+        <header><div><span>BUILD RUN</span><strong>{friendlyPhase(generationJob)}</strong><small>{generationJob.status === 'completed' ? `Preview ${generationJob.result?.previewVersion} passed verification.` : `${generationJob.progress}% complete`}</small></div><div className="build-progress-number">{generationJob.progress}%</div></header>
+        <div className="generation-progress-track"><i style={{ width: `${generationJob.progress}%` }}/></div>
+        <div className="friendly-build-stages">{['Designing experience', 'Building pages and data', 'Adding workflows and agents', 'Verifying behavior', 'Preparing preview'].map((label, index) => { const threshold = [12, 35, 60, 78, 96][index]!; const complete = generationJob.progress >= threshold; const current = !complete && generationJob.progress >= (index ? [12, 35, 60, 78][index - 1]! : 0); return <span key={label} className={complete ? 'complete' : current ? 'current' : ''}>{complete ? <Check/> : current ? <LoaderCircle className="spin"/> : <Clock3/>}{label}</span>; })}</div>
+        <div className="build-workers">{generationJob.workers.map((worker) => <article key={worker.templateId} className={worker.status}><span>{worker.status === 'running' ? <LoaderCircle className="spin"/> : worker.status === 'completed' ? <Check/> : worker.status === 'failed' ? <CircleAlert/> : <Clock3/>}</span><div><strong>{worker.name}</strong><small>{worker.status === 'running' ? 'Working now' : worker.status}{worker.metrics ? ` · ${worker.metrics.inputTokens + worker.metrics.outputTokens} tokens · ${worker.metrics.reasoningTokens} reasoning · ${worker.metrics.toolCalls} tools` : ''}</small></div></article>)}</div>
+        <p className="safe-activity-note">Reasoning summaries and tool calls are visible. Private chain-of-thought and credentials are never exposed.</p>
+        <details className="build-activity" open={generationActive || generationJob.status === 'completed'}><summary><span><Wrench/> Detailed agent and tool activity</span><em>{generationJob.events.length}</em></summary><div>{generationJob.events.slice().sort((a, b) => b.sequence - a.sequence).map((event) => <article key={event.id} className={event.type}><span>{event.type === 'tool' ? <Wrench/> : event.type === 'result' ? <Check/> : event.type === 'error' || event.type === 'warning' ? <CircleAlert/> : <Bot/>}</span><div><small>{event.actor}</small><strong>{event.title}</strong>{event.detail && <p>{event.detail}</p>}</div></article>)}</div></details>
+        {generationActive && <button className="cancel-build" onClick={() => void cancelGeneration()}><X/> Cancel build</button>}
+        {generationJob.status === 'completed' && <div className="build-complete-actions"><button onClick={() => setArea('review')}><Play/> Review working app</button><span>Production has not changed.</span></div>}
+        {generationJob.error && <div className="build-error"><CircleAlert/><div><strong>No preview was published</strong><p>{generationJob.error}</p></div></div>}
+      </div>}
+
+      <details className="advanced-build-settings"><summary>Advanced build settings</summary><div><label>Build instruction<textarea aria-label="Build instruction" value={instruction} onChange={(event) => setInstruction(event.target.value)}/></label>{generationProfile?.agents.map((worker, index) => { const selectedConnector = connectorById.get(worker.connector); return <article key={`${worker.templateId}-${index}`}><strong>{worker.name}</strong><label>Connector<select aria-label={`${worker.name} connector`} value={worker.connector} onChange={(event) => { const connector = connectorById.get(event.target.value); const model = connector?.models.find((candidate) => candidate.preferred)?.id ?? connector?.models[0]?.id; updateGenerationAgent(index, { connector: event.target.value, ...(model ? { model } : {}) }); }}>{generationOptions?.connectors.map((connector) => <option key={connector.id} value={connector.id}>{connector.name}{connector.configured ? '' : ' · unavailable'}</option>)}</select></label><label>Model<select aria-label={`${worker.name} model`} value={worker.model} onChange={(event) => updateGenerationAgent(index, { model: event.target.value })}>{selectedConnector?.models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label><label>Effort<select aria-label={`${worker.name} reasoning effort`} value={worker.effort} onChange={(event) => updateGenerationAgent(index, { effort: event.target.value as GenerationEffort })}>{generationOptions?.efforts.map((effort) => <option key={effort.id} value={effort.id}>{effort.name}</option>)}</select></label></article>; })}</div></details>
+    </section>}
+
+    {area === 'review' && <section className="review-experience">
+      <header><div><span>PREVIEW & RELEASES</span><h2>Review the actual application</h2><p>The preview is isolated from production. Publish only after the experience is correct.</p></div>{previewRelease && <button className="publish-preview" onClick={() => void promotePreview()} disabled={Boolean(busy)}>{busy === 'promote' ? <LoaderCircle className="spin"/> : <Rocket/>} Publish this preview</button>}</header>
+      <div className="app-preview-shell"><div className="app-preview-toolbar"><span><i/>{previewUrl ? 'Verified preview' : activeRelease ? 'Production' : 'No application build yet'}</span><div>{previewUrl && <a href={previewUrl} target="_blank" rel="noreferrer">Open preview <ExternalLink/></a>}{activeRelease && <a href={detail.app.url} target="_blank" rel="noreferrer">Open production <ExternalLink/></a>}</div></div>{previewUrl || activeRelease ? <iframe title={`${detail.app.name} application preview`} src={previewUrl ?? detail.app.url}/> : <div className="empty-preview"><Rocket/><strong>Build a preview first</strong><button onClick={() => setArea('build')}>Go to build</button></div>}</div>
+      <div className="release-summary-grid"><article><span>Definition</span><strong>v{detail.app.specRevision}</strong><small>{detail.app.specificationApprovalStatus}</small></article><article><span>Preview</span><strong>{previewRelease?.version ?? '—'}</strong><small>{previewRelease ? 'verified and isolated' : 'not available'}</small></article><article><span>Production</span><strong>{activeRelease?.version ?? '—'}</strong><small>{activeRelease ? 'currently live' : 'not published'}</small></article><article><span>Evidence</span><strong>{latestBuild?.tests ?? 0}</strong><small>admission checks</small></article></div>
+      <details className="release-history"><summary>Release history and evidence</summary><div>{detail.releases.map((release) => <article key={release.id}><span className={release.status}>{release.status}</span><strong>{release.version}</strong><small>spec v{release.specRevision} · source v{release.sourceRevision} · {new Date(release.createdAt).toLocaleString()}</small></article>)}{latestBuild?.checks.map((check) => <article key={check.id}><span className={check.status}>{check.status}</span><strong>{check.label}</strong><small>{check.detail}</small></article>)}</div></details>
+    </section>}
+
+    {area === 'settings' && <section className="application-settings-experience">
+      <header><span>APPLICATION SETTINGS</span><h2>Administration and technical details</h2><p>These controls are available when needed, without interrupting the product interview.</p></header>
+      <details><summary><span><ShieldCheck/> Audience, tenancy, and members</span><small>{detail.tenancy.mode.replaceAll('_', ' ')}</small></summary><TenancyStudio detail={detail} onDetail={setDetail} onNotice={setNotice} onError={setError}/></details>
+      <details><summary><span><Palette/> Visual design system</span><small>{detail.themes.find((theme) => theme.revision === detail.app.themeRevision)?.name ?? 'Theme'}</small></summary><VisualDesignStudio detail={detail} onDetail={setDetail} onNotice={setNotice} onError={setError}/></details>
+      <details><summary><span><Globe2/> Domains and locations</span><small>{detail.bindings.length} bindings</small></summary><div className="settings-domain"><div>{detail.bindings.map((binding) => <span key={binding.id}>{binding.hostname}{binding.pathPrefix} · {binding.status}</span>)}</div><form onSubmit={addDomain}><input aria-label="Custom hostname" value={domain} onChange={(event) => setDomain(event.target.value)} placeholder="app.customer.com"/><button disabled={!domain.trim() || Boolean(busy)}>{busy === 'domain' ? <LoaderCircle className="spin"/> : <Plus/>} Add hostname</button></form></div></details>
+      <details><summary><span><Code2/> Technical architecture</span><small>{detail.modules.length} modules · {detail.schemas.length} entities</small></summary><div className="technical-summary-grid"><article><FileText/><strong>Pages and modules</strong>{detail.routes.map((route) => <span key={route.id}>{route.path} → {route.pageModuleId}</span>)}</article><article><Database/><strong>MongoDB entities</strong>{detail.schemas.map((schema) => <span key={schema.id}>{schema.displayName} · {Object.keys((schema.jsonSchema.properties ?? {}) as object).length} fields</span>)}</article><article><Bot/><strong>Browser agents</strong>{detail.agents.map((agent) => <span key={agent.id}>{agent.name} · {agent.maximumIterations} turns</span>)}{!detail.agents.length && <span>No runtime agents</span>}</article><article><GitBranch/><strong>Connectors</strong>{detail.connectors.map((connector) => <span key={connector.id}>{connector.id}:{connector.action}</span>)}{!detail.connectors.length && <span>No runtime connectors</span>}</article></div></details>
+    </section>}
+    {createDialog}
   </div>;
 }

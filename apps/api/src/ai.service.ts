@@ -1,7 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Agent, Connector, Vendor, getModelsByVendor } from '@everworker/oneringai';
+import { Agent, Connector, Vendor, getModelsByVendor, type ToolFunction } from '@everworker/oneringai';
 import { z } from 'zod';
 import type { AppGraphChangeSet, BrowserAgentRecord, BrowserGenerationOptions, GenerationEffort } from './browser-app.domain.js';
+import { browserRuntimeAgentGuide } from './browser-runtime-capabilities.js';
 
 const INTERVIEW_INSTRUCTIONS = `You are One Ring's senior product discovery interviewer.
 The user is not assumed to be technically proficient. Be diligent without overwhelming them.
@@ -10,16 +11,27 @@ edge cases, exceptions, failure behavior, data sensitivity, integrations, non-go
 acceptance criteria, and production qualities. Ask exactly one high-leverage question at a time.
 Briefly state what you inferred before asking. Never ask the user to design the software.`;
 
+const SPECIFICATION_DISCOVERY_INSTRUCTIONS = `You are One Ring's senior application-definition orchestrator.
+You work on a generator-independent, structured product specification through the provided specification tools.
+The user is not expected to design software. Infer carefully, distinguish confirmed facts from proposals, and ask exactly
+one high-leverage question at the end. First call spec_get_summary. Use targeted spec_query_nodes calls, then make small,
+semantic tool updates for requirements, personas, user stories, UI surfaces, entities, workflows, runtime agents, decisions,
+integrations, measurable quality attributes, visual direction, and acceptance evidence. Never rewrite the entire specification. Never invent external integrations or consequential agent
+authority without recording them as proposed decisions. Call spec_validate_draft after editing. Your final response must
+briefly summarize what changed, identify the most important remaining uncertainty, and ask one plain-language question.`;
+
 const BROWSER_APP_INSTRUCTIONS = `You are a One Ring browser-native React application architect.
 Turn an approved PRD and current component graph into a safe, focused implementation revision. The application
 uses declarative routes, Mongo-backed component modules, a secure CRUD gateway, declarative role
 policies, browser-orchestrated agents, and allowlisted connector actions. Return only strict JSON with keys accent,
 headline, summary, moduleUpserts, moduleDeletes, routeUpserts, routeDeletes, schemaUpserts, schemaDeletes,
-policyUpserts, policyDeletes, agentUpserts, agentDeletes.
+policyUpserts, policyDeletes, connectorUpserts, connectorDeletes, agentUpserts, agentDeletes.
 Use stable lowercase IDs. You may create or revise pages, components, routes, and browser agent definitions, but every
 artifact must cite requirementIds from the supplied specification. Source must be complete TSX, use only React,
 react-router-dom, app:runtime, and app:module imports, preserve server security behavior, and never use raw HTML,
-eval, cookies, credentials, or secrets. Browser agent loops use runAgent from app:runtime; never call model vendors directly.`;
+eval, cookies, credentials, or secrets. Browser agent loops use runAgent from app:runtime; never call model vendors directly.
+
+${browserRuntimeAgentGuide()}`;
 
 const VISUAL_DESIGN_INSTRUCTIONS = `You are the dedicated visual design-system agent for a browser-native React application.
 Translate product context and a user's visual direction into a cohesive, accessible design system—not a random palette.
@@ -69,6 +81,13 @@ const graphPlanSchema = z.object({
     requirementIds,
   })).max(20).default([]),
   policyDeletes: z.array(stableId).max(20).default([]),
+  connectorUpserts: z.array(z.object({
+    id: stableId, connector: stableId, action: stableId, description: z.string().min(3).max(500),
+    allowedRoles: z.array(z.enum(['public', 'viewer', 'editor', 'admin'])).min(1).max(4),
+    inputSchema: z.record(z.string(), z.unknown()), outputSchema: z.record(z.string(), z.unknown()),
+    timeoutMs: z.number().int().min(1000).max(120000), rateLimitPerMinute: z.number().int().min(1).max(1000), requirementIds,
+  })).max(20).default([]),
+  connectorDeletes: z.array(stableId).max(20).default([]),
   agentUpserts: z.array(z.object({
     id: stableId, name: z.string().min(2).max(100), description: z.string().min(3).max(500), connector: stableId,
     model: z.string().min(1).max(100), instructions: z.string().min(10).max(10_000),
@@ -102,10 +121,10 @@ export class AiService {
       vendor: definition.vendor,
       configured: Boolean(definition.apiKey),
       models: getModelsByVendor(definition.vendor)
-        .filter((model) => model.isActive)
+        .filter((model) => model.isActive && !/(audio|realtime|transcrib|speech|tts|image|video|embedding|deep-research)/i.test(model.name))
         .sort((left, right) => Number(right.preferred) - Number(left.preferred)
           || String(right.releaseDate ?? '').localeCompare(String(left.releaseDate ?? '')))
-        .slice(0, 40)
+        .slice(0, 18)
         .map((model) => ({
           id: model.name,
           name: model.name,
@@ -137,35 +156,113 @@ export class AiService {
     }
   }
 
+  async discoverSpecification(
+    context: string,
+    message: string,
+    tools: ToolFunction[],
+    configuration: { connector?: string; model?: string; effort?: GenerationEffort; userId: string },
+    onEvent?: (event: { type: string; title: string; detail?: string; durationMs?: number; metadata?: Record<string, string | number | boolean> }) => void | Promise<void>,
+    signal?: AbortSignal,
+  ): Promise<{ reply: string; metrics: { inputTokens: number; outputTokens: number; reasoningTokens: number; toolCalls: number } }> {
+    if (!this.available()) return { reply: this.fallback(message), metrics: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, toolCalls: 0 } };
+    let agent: Agent | undefined;
+    const pendingEvents: Promise<void>[] = [];
+    const flush = async () => { await Promise.allSettled(pendingEvents.splice(0)); };
+    try {
+      agent = Agent.create({
+        connector: this.ensureConnector(configuration.connector),
+        model: configuration.model ?? process.env.ONERING_DEFAULT_MODEL ?? 'gpt-5.4-mini',
+        instructions: SPECIFICATION_DISCOVERY_INSTRUCTIONS,
+        thinking: { enabled: true, effort: configuration.effort ?? 'high' },
+        tools,
+        userId: configuration.userId,
+        maxIterations: 12,
+        limits: { maxExecutionTime: Number(process.env.DISCOVERY_AGENT_TIMEOUT_MS ?? 180_000), maxToolCalls: 40 },
+        errorHandling: { hookFailureMode: 'warn', toolFailureMode: 'continue', maxConsecutiveErrors: 4 },
+      });
+      const emit = (event: Parameters<NonNullable<typeof onEvent>>[0]) => {
+        const pending = Promise.resolve(onEvent?.(event));
+        void pending.catch(() => undefined);
+        pendingEvents.push(pending);
+      };
+      agent.on('iteration:start', (data: any) => emit({ type: 'thinking', title: 'Analyzing the application definition', detail: `Discovery iteration ${Number(data?.iteration ?? 0) + 1} is inspecting confirmed facts, gaps, and traceability.` }));
+      agent.on('llm:request', () => emit({ type: 'thinking', title: 'Specialist reasoning pass', detail: 'The discovery orchestrator is deciding which focused specification tools to use next.' }));
+      agent.on('tool:start', (data: any) => emit({ type: 'tool', title: `Calling ${data?.toolCall?.function?.name ?? 'specification tool'}`, detail: 'A validated operation is being applied to the isolated specification draft.' }));
+      agent.on('tool:complete', (data: any) => emit({ type: 'tool', title: `Completed ${data?.toolCall?.function?.name ?? 'specification tool'}`, durationMs: Number(data?.result?.executionTime ?? 0) }));
+      const abort = () => agent?.cancel('Discovery cancelled');
+      signal?.addEventListener('abort', abort, { once: true });
+      const response = await agent.run(`Application profile and current context:\n${context}\n\nLatest user answer:\n${message}`);
+      signal?.removeEventListener('abort', abort);
+      await flush();
+      if (signal?.aborted) throw new Error('Discovery cancelled');
+      const metrics = agent.getSummary()?.metrics;
+      return {
+        reply: response.output_text?.trim() || 'I updated the application definition. What is the most important outcome that still feels underspecified?',
+        metrics: { inputTokens: metrics?.inputTokens ?? 0, outputTokens: metrics?.outputTokens ?? 0, reasoningTokens: metrics?.reasoningTokens ?? 0, toolCalls: metrics?.toolCallCount ?? 0 },
+      };
+    } finally {
+      await flush();
+      agent?.destroy();
+    }
+  }
+
   async browserAppPlan(
     context: string,
     configuration?: { connector: string; model: string; effort: GenerationEffort; instructions: string },
-  ): Promise<{ accent: string; headline: string; changeSet: AppGraphChangeSet; agent: 'oneringai' | 'fallback' }> {
-    const fallback = {
-      accent: '#806cff', headline: 'Turn shared work into visible progress.', agent: 'fallback' as const,
-      changeSet: {
-        summary: 'Verified the current graph without unsafe changes.',
-        moduleUpserts: [], moduleDeletes: [], routeUpserts: [], routeDeletes: [],
-        schemaUpserts: [], schemaDeletes: [], policyUpserts: [], policyDeletes: [], agentUpserts: [], agentDeletes: [],
-      },
-    };
-    if (!this.available()) return fallback;
+    onEvent?: (event: { type: string; title: string; detail?: string; durationMs?: number; metadata?: Record<string, string | number | boolean> }) => void | Promise<void>,
+    signal?: AbortSignal,
+  ): Promise<{ accent: string; headline: string; changeSet: AppGraphChangeSet; agent: 'oneringai'; metrics: { inputTokens: number; outputTokens: number; reasoningTokens: number; toolCalls: number } }> {
+    if (!this.available()) throw new Error('No configured generation connector is available');
+    let agent: Agent | undefined;
+    let abortListener: (() => void) | undefined;
+    const pendingEvents: Promise<void>[] = [];
+    const flushEvents = async () => { await Promise.allSettled(pendingEvents.splice(0)); };
     try {
-      const agent = Agent.create({
+      agent = Agent.create({
         connector: this.ensureConnector(configuration?.connector),
         model: configuration?.model ?? process.env.ONERING_DEFAULT_MODEL ?? 'gpt-5.4-mini',
         instructions: `${configuration?.instructions ?? ''}\n\n${BROWSER_APP_INSTRUCTIONS}`.trim(),
         thinking: { enabled: true, effort: configuration?.effort ?? 'medium' },
-        maxIterations: 3,
+        maxIterations: 1,
+        limits: { maxExecutionTime: Number(process.env.GENERATION_AGENT_TIMEOUT_MS ?? 90_000), maxToolCalls: 12 },
       });
+      const emit = (event: Parameters<NonNullable<typeof onEvent>>[0]) => {
+        const pending = Promise.resolve(onEvent?.(event));
+        // Attach a handler immediately so event-persistence failures never become
+        // detached promise rejections; flushEvents still waits for every write.
+        void pending.catch(() => undefined);
+        pendingEvents.push(pending);
+      };
+      agent.on('iteration:start', (data: any) => emit({ type: 'thinking', title: 'Reasoning over the approved specification', detail: `Model iteration ${Number(data?.iteration ?? 0) + 1} is analyzing requirements, pages, data, policy, and release constraints.` }));
+      agent.on('llm:request', () => emit({ type: 'model', title: 'Model request sent', detail: `${configuration?.model ?? agent?.model} is producing a structured graph proposal.` }));
+      agent.on('tool:start', (data: any) => emit({ type: 'tool', title: `Running ${data?.toolCall?.function?.name ?? 'agent tool'}`, detail: 'The specialist requested an allowlisted tool.' }));
+      agent.on('tool:complete', (data: any) => emit({ type: 'tool', title: `Completed ${data?.toolCall?.function?.name ?? 'agent tool'}`, durationMs: Number(data?.result?.executionTime ?? 0) }));
+      abortListener = () => agent?.cancel('Generation cancelled by the user');
+      signal?.addEventListener('abort', abortListener, { once: true });
       const response = await agent.run(`Approved PRD:\n${context}`);
+      signal?.removeEventListener('abort', abortListener);
+      await flushEvents();
+      if (signal?.aborted) throw new Error('Generation cancelled by the user');
       const raw = response.output_text?.trim().replace(/^```(?:json)?\s*|\s*```$/g, '') ?? '';
       const parsed = graphPlanSchema.parse(JSON.parse(raw));
       const { accent, headline, ...changeSet } = parsed;
-      return { accent, headline, changeSet, agent: 'oneringai' };
+      const metrics = agent.getSummary()?.metrics;
+      await onEvent?.({
+        type: 'thinking', title: 'Reasoning pass completed',
+        detail: `The specialist produced a validated structured proposal using ${configuration?.effort ?? 'medium'} reasoning. Private chain-of-thought is not exposed.`,
+        metadata: { reasoningTokens: metrics?.reasoningTokens ?? 0, totalTokens: metrics?.totalTokens ?? response.usage?.total_tokens ?? 0 },
+      });
+      return {
+        accent, headline, changeSet, agent: 'oneringai',
+        metrics: { inputTokens: metrics?.inputTokens ?? 0, outputTokens: metrics?.outputTokens ?? 0, reasoningTokens: metrics?.reasoningTokens ?? 0, toolCalls: metrics?.toolCallCount ?? 0 },
+      };
     } catch (error) {
-      this.logger.warn(`Browser app planning failed; using safe plan: ${String(error)}`);
-      return fallback;
+      await flushEvents();
+      this.logger.warn(`Browser app planning failed: ${String(error)}`);
+      throw error;
+    } finally {
+      if (abortListener) signal?.removeEventListener('abort', abortListener);
+      agent?.destroy();
     }
   }
 

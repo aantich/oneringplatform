@@ -11,6 +11,17 @@ import { StoreService } from './store.service.js';
 describe('platform API', () => {
   let app: INestApplication;
 
+  async function waitForGeneration(appId: string, jobId: string) {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const response = await request(app.getHttpServer())
+        .get(`/api/browser-apps/${appId}/generation-jobs/${jobId}`)
+        .expect(200);
+      if (['completed', 'failed', 'cancelled'].includes(response.body.status)) return response.body;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`Generation job ${jobId} did not finish`);
+  }
+
   beforeAll(async () => {
     process.env.NODE_ENV = 'test';
     process.env.LOCAL_DEV_AUTH = '1';
@@ -54,6 +65,17 @@ describe('platform API', () => {
     invalid.agents[0].model = 'not-a-real-model';
     await request(app.getHttpServer()).post('/api/browser-apps/pulse-tasks/generate')
       .send({ instruction: 'This must not run.', generationProfile: invalid }).expect(400);
+  });
+
+  it('returns an explicit empty generation-job envelope for apps without job history', async () => {
+    const created = await request(app.getHttpServer()).post('/api/browser-apps')
+      .send({ name: 'Empty Job Probe', description: 'An app used to verify empty generation history.', mode: 'team' })
+      .expect(201);
+    const appId = created.body.detail.app.id;
+    const latest = await request(app.getHttpServer())
+      .get(`/api/browser-apps/${appId}/generation-jobs/latest`)
+      .expect(200);
+    expect(latest.body).toEqual({ job: null });
   });
 
   it('updates an artifact through the canonical structured spec', async () => {
@@ -106,15 +128,19 @@ describe('platform API', () => {
 
   it('stores a versioned module graph in MongoDB and publishes a browser release', async () => {
     const list = await request(app.getHttpServer()).get('/api/browser-apps').expect(200);
-    expect(list.body[0]).toMatchObject({ id: 'pulse-tasks', runtimeProfile: 'browser_data', moduleCount: 2, routeCount: 2 });
+    expect(list.body.find((candidate: { id: string }) => candidate.id === 'pulse-tasks'))
+      .toMatchObject({ id: 'pulse-tasks', runtimeProfile: 'browser_data', moduleCount: 2, routeCount: 2 });
 
     const detail = await request(app.getHttpServer()).get('/api/browser-apps/pulse-tasks').expect(200);
+    expect(detail.body.app.url).toBe('/apps/pulse-tasks/');
     expect(detail.body.modules.map((module: { kind: string }) => module.kind)).toEqual(['page', 'page']);
     expect(detail.body.routes[0]).toHaveProperty('pageModuleId');
     expect(detail.body.releases[0].status).toBe('active');
 
     const shell = await request(app.getHttpServer()).get('/apps/pulse-tasks/about').expect(200);
     expect(shell.headers['content-security-policy']).toContain("script-src 'self'");
+    expect(shell.headers['content-security-policy']).toContain("frame-ancestors 'self'");
+    expect(shell.headers['content-security-policy']).not.toContain("frame-ancestors 'none'");
     expect(shell.text).toContain('/apps/pulse-tasks/_or/assets/');
   });
 
@@ -122,6 +148,15 @@ describe('platform API', () => {
     const browser = request.agent(app.getHttpServer());
     const initial = await browser.get('/apps/pulse-tasks/_or/bootstrap').expect(200);
     expect(initial.body.principal.role).toBe('public');
+    expect(initial.body.runtime).toMatchObject({
+      contractVersion: 4,
+      entities: [expect.objectContaining({ id: 'tasks', operations: ['read'] })],
+    });
+    expect(initial.body.runtime.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'data.list', helper: 'data.list(entity, options?)' }),
+      expect.objectContaining({ id: 'connector.invoke', helper: 'invokeConnector(connectorId, action, input)' }),
+      expect.objectContaining({ id: 'agent.run', helper: 'runAgent(agentId, goal, options?)' }),
+    ]));
 
     const publicTasks = await browser.get('/apps/pulse-tasks/_or/data/tasks').expect(200);
     expect(publicTasks.body.items).toHaveLength(1);
@@ -260,7 +295,7 @@ describe('platform API', () => {
       .expect(201);
     expect(multi.body.detail).toMatchObject({ app: { tenancyMode: 'multi_organization', tenancyRevision: 4 }, tenancy: { mode: 'multi_organization', organizationLabel: 'Customer organization' } });
     expect(multi.body.detail.builds[0].checks.map((check: { id: string }) => check.id)).toEqual([
-      'graph', 'specification', 'traceability', 'acceptance', 'contracts', 'imports', 'source-security', 'tenancy', 'theme', 'compile', 'artifact',
+      'graph', 'specification', 'semantic-alignment', 'traceability', 'acceptance', 'contracts', 'imports', 'source-security', 'tenancy', 'theme', 'compile', 'artifact',
     ]);
     expect(multi.body.detail.builds[0].checks.every((check: { status: string }) => check.status === 'passed')).toBe(true);
 
@@ -332,7 +367,7 @@ describe('platform API', () => {
     expect(resolved.body).toMatchObject({ appId: 'pulse-tasks', binding: { type: 'custom_hostname' } });
   });
 
-  it('creates, validates, publishes, and pins an independent visual theme revision', async () => {
+  it('creates, validates, and stages an independent visual theme revision without changing production', async () => {
     const original = await request(app.getHttpServer()).get('/api/browser-apps/pulse-tasks').expect(200);
     const originalRelease = original.body.releases.find((release: { status: string }) => release.status === 'active');
     const starters = await request(app.getHttpServer()).get('/api/browser-apps/theme-starters').expect(200);
@@ -357,11 +392,16 @@ describe('platform API', () => {
       .expect(201);
     expect(published.body.theme.status).toBe('published');
     expect(published.body.detail.app.themeRevision).toBe(2);
-    expect(published.body.detail.releases[0]).toMatchObject({ status: 'active', themeRevision: 2 });
-    const build = published.body.detail.builds.find((candidate: { id: string }) => candidate.id === published.body.detail.releases[0].buildId);
+    expect(published.body.detail.app.lifecycleStatus).toBe('preview_ready');
+    const themePreview = published.body.detail.releases.find((release: { status: string; themeRevision: number }) =>
+      release.status === 'preview' && release.themeRevision === 2);
+    expect(themePreview).toBeTruthy();
+    expect(published.body.detail.releases.find((release: { status: string }) => release.status === 'active').id).toBe(originalRelease.id);
+    const build = published.body.detail.builds.find((candidate: { id: string }) => candidate.id === themePreview.buildId);
     expect(build).toMatchObject({ themeRevision: 2, themeName: 'Paper Studio', themeColor: '#f5f3ee' });
 
-    const shell = await request(app.getHttpServer()).get('/apps/pulse-tasks/').expect(200);
+    const shell = await request(app.getHttpServer())
+      .get(`/apps/pulse-tasks/?preview=${themePreview.id}&token=${themePreview.previewToken}`).expect(200);
     expect(shell.text).toContain('content="#f5f3ee"');
 
     const rolledBack = await request(app.getHttpServer())
@@ -419,12 +459,41 @@ describe('platform API', () => {
       .post('/api/browser-apps')
       .send({ name: 'Launch Ledger', description: 'Track launch decisions and ownership.', mode: 'team' })
       .expect(201);
-    expect(created.body.detail.app).toMatchObject({ id: 'launch-ledger', tenancyMode: 'team', sourceRevision: 1 });
+    expect(created.body.detail.app).toMatchObject({ id: 'launch-ledger', tenancyMode: 'team', sourceRevision: 0, lifecycleStatus: 'draft' });
+    expect(created.body.publication).toBeNull();
     expect(created.body.detail.specification.appId).toBe('launch-ledger');
+    expect(created.body.detail.modules).toEqual([]);
+    expect(created.body.detail.releases).toEqual([]);
     expect(created.body.detail.modules.every((module: { appId: string }) => module.appId === 'launch-ledger')).toBe(true);
     const list = await request(app.getHttpServer()).get('/api/browser-apps').expect(200);
     expect(list.body.map((candidate: { id: string }) => candidate.id)).toContain('launch-ledger');
-    await request(app.getHttpServer()).get('/apps/launch-ledger/').expect(200);
+    await request(app.getHttpServer()).get('/apps/launch-ledger/').expect(404);
+  });
+
+  it('profiles applications before discovery and selects generators by capability', async () => {
+    const generators = await request(app.getHttpServer()).get('/api/browser-apps/generators').expect(200);
+    expect(generators.body).toContainEqual(expect.objectContaining({ id: 'browser-data', available: true, supportedApplicationTypes: ['browser_data'] }));
+    expect(generators.body).toContainEqual(expect.objectContaining({ id: 'workflow-automation', available: false }));
+
+    const created = await request(app.getHttpServer()).post('/api/browser-apps').send({
+      name: 'Renewal Automation', description: 'Coordinate renewal reminders, approvals, and recovery paths.', mode: 'multi_organization',
+      profile: {
+        applicationType: 'workflow_automation', tenancyMode: 'multi_organization', identityMode: 'organization_sso',
+        agenticLevel: 'tool_using', dataSensitivity: 'confidential', deploymentTarget: 'managed_platform',
+        execution: { browser: false, server: true, backgroundJobs: true, schedules: true, webhooks: true },
+      },
+    }).expect(201);
+    expect(created.body.detail.app).toMatchObject({ runtimeProfile: 'specification_only', generatorId: null, specificationApprovalStatus: 'draft' });
+    expect(created.body.detail.app.profile).toMatchObject({ applicationType: 'workflow_automation', tenancyMode: 'multi_organization', agenticLevel: 'tool_using' });
+    expect(created.body.detail.specification.structure.decisions).toContainEqual(expect.objectContaining({ id: 'application-profile', status: 'confirmed' }));
+    const discovery = await request(app.getHttpServer()).get(`/api/browser-apps/${created.body.detail.app.id}/discovery`).expect(200);
+    expect(discovery.body).toMatchObject({ status: 'idle', currentSpecRevision: 1 });
+    const repeatedDiscovery = await request(app.getHttpServer()).get(`/api/browser-apps/${created.body.detail.app.id}/discovery`).expect(200);
+    expect(repeatedDiscovery.body).not.toHaveProperty('_id');
+    expect(repeatedDiscovery.body.coverage.score).toBeGreaterThan(0);
+    await request(app.getHttpServer()).post(`/api/browser-apps/${created.body.detail.app.id}/generate`)
+      .send({ instruction: 'Generate it.', generationProfile: (await request(app.getHttpServer()).get('/api/browser-apps/generation-options')).body.defaultProfile })
+      .expect(400);
   });
 
   it('compiles specification page changes into a verified preview and promotes the exact artifact', async () => {
@@ -432,7 +501,7 @@ describe('platform API', () => {
       name: 'Specification Flow', description: 'Proves authoritative specification generation and preview promotion.', mode: 'team',
     }).expect(201);
     const appId = created.body.detail.app.id as string;
-    const originalActiveReleaseId = created.body.detail.app.activeReleaseId as string;
+    expect(created.body.detail.app.lifecycleStatus).toBe('draft');
     const originalSourceRevision = created.body.detail.app.sourceRevision as number;
     const structure = structuredClone(created.body.detail.specification.structure);
     structure.pages.push({
@@ -453,33 +522,46 @@ describe('platform API', () => {
       structure,
     }).expect(200);
     expect(revised.body.detail.app.generatedFromSpecRevision).not.toBe(revised.body.detail.app.specRevision);
+    await request(app.getHttpServer()).post(`/api/browser-apps/${appId}/specification/approve`).expect(201);
 
     process.env.AI_DISABLED = '1';
-    let generated;
+    let generationJob;
     try {
       const options = await request(app.getHttpServer()).get('/api/browser-apps/generation-options').expect(200);
       const generationProfile = structuredClone(options.body.defaultProfile);
       generationProfile.agents = generationProfile.agents.map((agent: Record<string, unknown>) => ({ ...agent, effort: 'high' }));
-      generated = await request(app.getHttpServer()).post(`/api/browser-apps/${appId}/generate`)
+      const started = await request(app.getHttpServer()).post(`/api/browser-apps/${appId}/generate`)
         .send({ instruction: 'Implement every new page in the authoritative specification.', generationProfile }).expect(201);
+      expect(started.body).toMatchObject({ appId, status: 'queued', progress: 0 });
+      generationJob = await waitForGeneration(appId, started.body.id);
     } finally {
       delete process.env.AI_DISABLED;
     }
-    expect(generated.body.detail.app.sourceRevision).toBeGreaterThan(originalSourceRevision);
-    expect(generated.body.detail.app.generatedFromSpecRevision).toBe(generated.body.detail.app.specRevision);
-    expect(generated.body.plan.workers).toHaveLength(2);
-    expect(generated.body.detail.app.generationProfile.agents.every((agent: { effort: string }) => agent.effort === 'high')).toBe(true);
-    expect(generated.body.detail.app.activeReleaseId).toBe(originalActiveReleaseId);
-    expect(generated.body.detail.routes).toContainEqual(expect.objectContaining({ specPageId: 'page-decisions', path: '/decisions' }));
-    expect(generated.body.detail.schemas).toContainEqual(expect.objectContaining({
+    if (generationJob.status !== 'completed') throw new Error(generationJob.error ?? `Generation ended ${generationJob.status}`);
+    expect(generationJob).toMatchObject({ status: 'completed', phase: 'preview_ready', progress: 100 });
+    expect(generationJob.workers).toHaveLength(2);
+    expect(generationJob.workers.every((worker: { status: string; metrics: { toolCalls: number } }) =>
+      worker.status === 'completed' && worker.metrics.toolCalls === 0)).toBe(true);
+    expect(generationJob.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'warning', title: 'Model generation is disabled' }),
+      expect.objectContaining({ type: 'tool', title: 'Running preview admission' }),
+      expect.objectContaining({ type: 'result', title: 'Verified preview is ready' }),
+    ]));
+    const generated = await request(app.getHttpServer()).get(`/api/browser-apps/${appId}`).expect(200);
+    expect(generated.body.app.sourceRevision).toBeGreaterThan(originalSourceRevision);
+    expect(generated.body.app.generatedFromSpecRevision).toBe(generated.body.app.specRevision);
+    expect(generated.body.app.generationProfile.agents.every((agent: { effort: string }) => agent.effort === 'high')).toBe(true);
+    expect(generated.body.app.activeReleaseId).toBeUndefined();
+    expect(generated.body.routes).toContainEqual(expect.objectContaining({ specPageId: 'page-decisions', path: '/decisions' }));
+    expect(generated.body.schemas).toContainEqual(expect.objectContaining({
       entity: 'decisions', physicalCollection: expect.stringMatching(/^a_[a-z0-9_]+_prod_decisions$/),
     }));
-    expect(generated.body.detail.policies).toContainEqual(expect.objectContaining({ entity: 'decisions' }));
-    const preview = generated.body.detail.releases.find((release: { status: string }) => release.status === 'preview');
-    expect(preview).toMatchObject({ environment: 'preview', specRevision: generated.body.detail.app.specRevision });
-    expect(preview.generationProfile).toEqual(generated.body.detail.app.generationProfile);
-    const generatedBuild = generated.body.detail.builds.find((build: { id: string }) => build.id === preview.buildId);
-    expect(generatedBuild.generationProfile).toEqual(generated.body.detail.app.generationProfile);
+    expect(generated.body.policies).toContainEqual(expect.objectContaining({ entity: 'decisions' }));
+    const preview = generated.body.releases.find((release: { status: string }) => release.status === 'preview');
+    expect(preview).toMatchObject({ environment: 'preview', specRevision: generated.body.app.specRevision });
+    expect(preview.generationProfile).toEqual(generated.body.app.generationProfile);
+    const generatedBuild = generated.body.builds.find((build: { id: string }) => build.id === preview.buildId);
+    expect(generatedBuild.generationProfile).toEqual(generated.body.app.generationProfile);
     expect(preview.previewToken).toBeTruthy();
     const previewShell = await request(app.getHttpServer())
       .get(`/apps/${appId}/decisions?preview=${preview.id}&token=${preview.previewToken}`)
@@ -489,8 +571,7 @@ describe('platform API', () => {
     const previewSession = await request(app.getHttpServer()).get(`/apps/${appId}/_or/bootstrap`)
       .set('x-onering-preview-release', preview.id).set('x-onering-preview-token', preview.previewToken).expect(200);
     expect(previewSession.body).toMatchObject({ releaseId: preview.id, environment: 'preview', sourceRevision: preview.sourceRevision });
-    const productionSession = await request(app.getHttpServer()).get(`/apps/${appId}/_or/bootstrap`).expect(200);
-    expect(productionSession.body).toMatchObject({ releaseId: originalActiveReleaseId, environment: 'production', sourceRevision: originalSourceRevision });
+    await request(app.getHttpServer()).get(`/apps/${appId}/_or/bootstrap`).expect(404);
 
     const promoted = await request(app.getHttpServer()).post(`/api/browser-apps/${appId}/releases/${preview.id}/promote`).expect(201);
     expect(promoted.body.detail.app.activeReleaseId).toBe(preview.id);

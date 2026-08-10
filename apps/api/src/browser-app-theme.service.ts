@@ -70,6 +70,7 @@ export class BrowserAppThemeService {
     const fallback = this.selectFallback(direction);
     let agent: 'oneringai' | 'fallback' = generated ? 'oneringai' : 'fallback';
     let input: unknown = generated ? this.sanitizeGenerated(generated, fallback) : { ...fallback, customCss: '' };
+    input = this.repairAccessibility(input, fallback);
     try {
       return { theme: await this.createDraft(appId, input, 'visual-design-agent'), agent };
     } catch {
@@ -90,7 +91,8 @@ export class BrowserAppThemeService {
     const previousRevision = app.themeRevision;
     await this.repository.setPublishedTheme(app.id, theme.revision);
     try {
-      const publication = await this.builder.buildAndRelease(app.id);
+      const publication = await this.builder.buildAndRelease(app.id, { activate: false });
+      await this.repository.setAppLifecycle(app.id, 'preview_ready');
       return { theme: await this.repository.theme(app.id, theme.revision), publication };
     } catch (error) {
       await this.repository.setPublishedTheme(app.id, previousRevision);
@@ -143,5 +145,21 @@ export class BrowserAppThemeService {
       },
       customCss: '',
     };
+  }
+
+  private repairAccessibility(input: unknown, fallback: ReturnType<BrowserAppThemeService['selectFallback']>): unknown {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
+    const candidate = structuredClone(input) as { tokens?: ThemeRevision['tokens'] } & Record<string, unknown>;
+    if (!candidate.tokens) return candidate;
+    let accessibility = this.compiler.accessibility(candidate.tokens);
+    if (!accessibility.issues.length) return candidate;
+    candidate.tokens.colors.text = fallback.tokens.colors.text;
+    candidate.tokens.colors.background = fallback.tokens.colors.background;
+    candidate.tokens.colors.surface = fallback.tokens.colors.surface;
+    candidate.tokens.colors.primary = fallback.tokens.colors.primary;
+    candidate.tokens.colors.primaryContrast = fallback.tokens.colors.primaryContrast;
+    accessibility = this.compiler.accessibility(candidate.tokens);
+    if (accessibility.issues.length) candidate.tokens = structuredClone(fallback.tokens);
+    return candidate;
   }
 }

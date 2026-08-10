@@ -15,6 +15,7 @@ import type {
   ThemeStarter,
   TenancyRevision,
 } from './browser-app.domain.js';
+import { defaultApplicationProfile } from './application-profile.js';
 
 const now = new Date().toISOString();
 const appId = 'pulse-tasks';
@@ -124,7 +125,7 @@ export const runtimeCss = `:root{font-family:Inter,ui-sans-serif,system-ui,-appl
 function module(id: string, kind: AppModuleRecord['kind'], name: string, description: string, source: string): AppModuleRecord {
   return {
     id, appId, revision: 1, kind, name, description, source,
-    dependencies: [], packageImports: ['react'], requiredCapabilities: [], requirementIds: ['goal', 'experience'],
+    dependencies: [], packageImports: ['react'], requiredCapabilities: [], requirementIds: ['goal', 'security', 'experience'],
     contentHash: createHash('sha256').update(source).digest('hex'), createdAt: now,
   };
 }
@@ -136,6 +137,8 @@ export const seedBrowserApp: BrowserApp = {
   name: 'Pulse Tasks',
   description: 'A browser-native team task application generated from a living PRD.',
   runtimeProfile: 'browser_data',
+  profile: defaultApplicationProfile('browser_data', 'multi_organization'),
+  generatorId: 'browser-data',
   projectId: 'fieldops-ai',
   specRevision: 13,
   generatedFromSpecRevision: 13,
@@ -146,6 +149,8 @@ export const seedBrowserApp: BrowserApp = {
   themeRevision: 1,
   tenancyRevision: 1,
   tenancyMode: 'multi_organization',
+  lifecycleStatus: 'production',
+  specificationApprovalStatus: 'approved',
   createdAt: now,
   updatedAt: now,
 };
@@ -160,6 +165,8 @@ export const seedBrowserAppSpecification: BrowserAppSpecification = {
   structure: {
     purpose: 'Help operations teams coordinate role-aware work through a secure browser-native task workspace.',
     audience: 'multi_organization',
+    personas: [{ id: 'operations-member', name: 'Operations member', description: 'Coordinates organization work.', goals: ['Keep shared work visible and moving.'], painPoints: ['Unclear ownership and status.'], roleIds: ['viewer', 'editor'] }],
+    userStories: [{ id: 'manage-team-tasks', title: 'Manage team tasks', personaId: 'operations-member', statement: 'As an operations member, I want to coordinate visible tasks so the team knows what happens next.', priority: 'must', surfaceIds: ['page-task-board'], workflowIds: ['workflow-task-lifecycle'], acceptanceCriterionIds: ['accept-task-isolation'] }],
     roles: [
       { id: 'public', name: 'Public visitor', description: 'Can read explicitly public records.' },
       { id: 'viewer', name: 'Viewer', description: 'Can read organization records.' },
@@ -182,6 +189,13 @@ export const seedBrowserAppSpecification: BrowserAppSpecification = {
       { id: 'suggest', type: 'agent', description: 'Ask the browser-owned planning agent for a next task.' },
     ] }],
     agents: [{ id: 'task-planner', name: 'Task planner', purpose: 'Suggest one useful next task.', connector: 'openai-main', model: 'gpt-5.4-mini', toolIds: ['idea-assistant:suggest'], maximumIterations: 4, humanApprovalRequired: false }],
+    integrations: [{ id: 'idea-assistant', name: 'Idea assistant', purpose: 'Provide bounded task suggestions.', connector: 'openai-main', operations: ['suggest'], failureBehavior: 'Keep manual task creation available.', dataClassification: 'standard' }],
+    decisions: [{ id: 'browser-owned-agent-loop', title: 'Browser-owned agent loop', decision: 'Agent iteration and approvals run in the browser through managed gateways.', rationale: 'Keep application behavior lightweight while credentials and authorization remain server-side.', status: 'confirmed', sourceMessageIds: [] }],
+    qualityAttributes: [
+      { id: 'accessible-ui', category: 'accessibility', requirement: 'All task journeys are keyboard accessible.', measure: 'WCAG 2.2 AA checks pass.' },
+      { id: 'tenant-isolation', category: 'security', requirement: 'Organization records remain isolated.', measure: 'Negative cross-tenant tests pass.' },
+    ],
+    designBrief: { tone: 'Focused, trustworthy and calm.', principles: ['Clear hierarchy', 'Visible status', 'Accessible contrast'], accessibilityTarget: 'AA' },
     acceptanceCriteria: [
       { id: 'accept-task-isolation', requirementId: 'security', description: 'Members cannot read or mutate another organization’s private tasks.', kind: 'policy' },
       { id: 'accept-agent-plan', requirementId: 'goal', description: 'An authenticated member can obtain a validated next-task suggestion.', kind: 'agent' },
@@ -191,8 +205,8 @@ export const seedBrowserAppSpecification: BrowserAppSpecification = {
 };
 
 export const seedModules = [
-  module('task-board-page', 'page', 'Task board', 'CRUD task board with role-aware controls and a secure connector action.', taskPageSource),
-  module('about-page', 'page', 'Architecture page', 'Explains the generated app runtime.', aboutPageSource),
+  module('task-board-page', 'page', 'Task board', 'Coordinate role-aware team tasks.', taskPageSource),
+  module('about-page', 'page', 'Architecture', 'Explain the application trust boundary.', aboutPageSource),
 ];
 
 export const seedRoutes: RouteDefinition[] = [
@@ -277,7 +291,7 @@ export const themeStarters: ThemeStarter[] = [
   {
     id: 'midnight-violet', name: 'Midnight Violet', description: 'Focused, premium and technical.',
     tokens: {
-      colors: { background: '#090b13', surface: '#11131b', surfaceElevated: '#171923', text: '#eef1ff', textMuted: '#a5abc0', primary: '#806cff', primaryContrast: '#ffffff', accent: '#5eead4', success: '#61ddb7', danger: '#e6889d', border: '#292b38' },
+      colors: { background: '#090b13', surface: '#11131b', surfaceElevated: '#171923', text: '#eef1ff', textMuted: '#a5abc0', primary: '#5b46c7', primaryContrast: '#ffffff', accent: '#5eead4', success: '#61ddb7', danger: '#e6889d', border: '#292b38' },
       typography: { fontFamily: 'inter', headingStyle: 'compact', baseSize: 16 },
       shape: { radius: 'rounded', borderWidth: 1 }, density: 'comfortable', contentWidth: 'standard',
     },
@@ -326,5 +340,5 @@ export const seedTheme: ThemeRevision = {
   description: themeStarters[0]!.description, starterId: themeStarters[0]!.id,
   tokens: themeStarters[0]!.tokens, componentVariants: themeStarters[0]!.componentVariants,
   customCss: '', status: 'published', createdBy: 'system',
-  accessibility: { contrastScore: 17.12, issues: [] }, createdAt: now,
+  accessibility: { contrastScore: 6.68, issues: [] }, createdAt: now,
 };

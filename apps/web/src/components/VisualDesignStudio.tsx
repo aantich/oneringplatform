@@ -21,13 +21,17 @@ export function VisualDesignStudio({ detail, onDetail, onNotice, onError }: Prop
   const [starters, setStarters] = useState<ThemeStarter[]>([]);
   const [draft, setDraft] = useState<ThemeRevision>(activeTheme);
   const [persistedRevision, setPersistedRevision] = useState<number>();
-  const [direction, setDirection] = useState('Create a calm, premium operations workspace with excellent information hierarchy.');
+  const [direction, setDirection] = useState(() => `Create a polished, accessible visual system for ${detail.app.name}: ${detail.app.description}`);
   const [busy, setBusy] = useState<'agent' | 'publish'>();
   const [previewCss, setPreviewCss] = useState('');
   const [previewCssError, setPreviewCssError] = useState<string>();
+  const [previewAccessibility, setPreviewAccessibility] = useState(activeTheme.accessibility);
 
   useEffect(() => { void api.themeStarters().then(setStarters).catch((error: Error) => onError(error.message)); }, []);
   useEffect(() => { setDraft(activeTheme); setPersistedRevision(undefined); }, [activeTheme.id]);
+  useEffect(() => {
+    setDirection(`Create a polished, accessible visual system for ${detail.app.name}: ${detail.app.description}`);
+  }, [detail.app.id]);
   useEffect(() => {
     let cancelled = false;
     const timer = window.setTimeout(() => {
@@ -35,7 +39,7 @@ export function VisualDesignStudio({ detail, onDetail, onNotice, onError }: Prop
         name: draft.name, description: draft.description, starterId: draft.starterId,
         tokens: draft.tokens, componentVariants: draft.componentVariants, customCss: draft.customCss,
       }).then((result) => {
-        if (!cancelled) { setPreviewCss(result.scopedCss.replaceAll('.app-frame', '.theme-live-preview')); setPreviewCssError(undefined); }
+        if (!cancelled) { setPreviewCss(result.scopedCss.replaceAll('.app-frame', '.theme-live-preview')); setPreviewAccessibility(result.accessibility); setPreviewCssError(undefined); }
       }).catch((reason: Error) => {
         if (!cancelled) { setPreviewCss(''); setPreviewCssError(reason.message); }
       });
@@ -88,16 +92,29 @@ export function VisualDesignStudio({ detail, onDetail, onNotice, onError }: Prop
       const result = await api.publishTheme(detail.app.id, revision);
       onDetail(result.detail);
       setPersistedRevision(undefined);
-      onNotice(`Theme ${result.theme.name} is published in release ${result.detail.releases.find((release) => release.status === 'active')?.version}.`);
+      onNotice(`Theme ${result.theme.name} is included in verified preview ${result.publication.release.version}. Production is unchanged until you promote that preview.`);
     } catch (reason) { onError(reason instanceof Error ? reason.message : 'Theme publish failed'); }
     finally { setBusy(undefined); }
+  }
+
+  function autoFixContrast() {
+    const light = /^#(?:f|e|d|c)/i.test(draft.tokens.colors.background);
+    changed({
+      ...draft,
+      tokens: { ...draft.tokens, colors: {
+        ...draft.tokens.colors,
+        text: light ? '#171411' : '#F7F4EE',
+        primary: light ? '#405E48' : '#B9D7BF',
+        primaryContrast: light ? '#FFFFFF' : '#102016',
+      } },
+    });
   }
 
   return <div className="visual-design-studio">
     <section className="design-agent-bar">
       <span className="design-agent-icon"><WandSparkles /></span>
       <div><small>DEDICATED ONERINGAI VISUAL DESIGN AGENT</small><strong>Describe the feeling, not the CSS</strong><p>The agent uses the approved PRD, pages, superadmin prompt and accessibility contract.</p></div>
-      <div className="design-agent-input"><input value={direction} onChange={(event) => setDirection(event.target.value)} aria-label="Visual direction"/><button onClick={() => void generate()} disabled={Boolean(busy)}>{busy === 'agent' ? <LoaderCircle className="spin" /> : <Sparkles />} Generate design</button></div>
+      <div className="design-agent-input"><input value={direction} onChange={(event) => setDirection(event.target.value)} aria-label="Visual direction" disabled={Boolean(busy)}/><button onClick={() => void generate()} disabled={Boolean(busy)}>{busy === 'agent' ? <LoaderCircle className="spin" /> : <Sparkles />} {busy === 'agent' ? 'Visual agent working…' : 'Generate design'}</button>{busy === 'agent' && <small role="status">Analyzing the PRD, page contracts, theme tokens, and accessibility gates…</small>}</div>
     </section>
 
     <div className="design-layout">
@@ -113,8 +130,8 @@ export function VisualDesignStudio({ detail, onDetail, onNotice, onError }: Prop
         <div className="design-section-title"><span>Live application preview</span><small>Unsaved changes stay local</small></div>
         <div className={`theme-live-preview preview-nav-${draft.componentVariants.navigation} preview-cards-${draft.componentVariants.cards} preview-buttons-${draft.componentVariants.buttons}`} style={previewStyle}>
           <style>{previewCss}</style>
-          <header><span className="preview-brand"><i>◉</i> Acme Operations</span><nav><b>Overview</b><span>Customers</span><span>Reports</span></nav><em>Live</em></header>
-          <div className="preview-body hero-card"><span className="preview-eyebrow">OPERATIONS OVERVIEW</span><h2>Everything important, clearly prioritized.</h2><p>Generated components consume semantic design tokens, so visual changes remain decoupled from application behavior.</p><div className="preview-metrics architecture-cards"><article><small>Open requests</small><strong>248</strong><i>+12%</i></article><article><small>Resolved today</small><strong>94</strong><i>On target</i></article><article><small>Attention needed</small><strong>7</strong><i>Review</i></article></div><div className="preview-work"><section className="task-panel"><div className="section-heading"><strong>Recent activity</strong><button>View all</button></div>{['Northwind request approved','Technician assigned','SLA risk resolved'].map((item, index) => <p className="task-row" key={item}><i>{index + 1}</i><span><b>{item}</b><small>{index + 2} minutes ago</small></span><em>{index === 2 ? 'Done' : 'Active'}</em></p>)}</section><aside className="copilot-card"><span>AI COPILOT</span><strong>Three priorities are ready for review.</strong><p>Every action remains governed by your role policy.</p><button>Review priorities</button></aside></div></div>
+          <header><span className="preview-brand"><i>◉</i> {detail.app.name}</span><nav>{detail.specification.structure.pages.slice(0, 3).map((page, index) => index === 0 ? <b key={page.id}>{page.name}</b> : <span key={page.id}>{page.name}</span>)}</nav><em>Preview</em></header>
+          <div className="preview-body hero-card"><span className="preview-eyebrow">{detail.specification.structure.pages[0]?.name ?? 'APPLICATION'}</span><h2>{detail.specification.structure.purpose}</h2><p>{detail.app.description}</p><div className="preview-metrics architecture-cards"><article><small>Pages</small><strong>{detail.specification.structure.pages.length}</strong><i>Declared</i></article><article><small>Data entities</small><strong>{detail.specification.structure.entities.length}</strong><i>Mongo-backed</i></article><article><small>Browser agents</small><strong>{detail.specification.structure.agents.length}</strong><i>Governed</i></article></div><div className="preview-work"><section className="task-panel"><div className="section-heading"><strong>Application pages</strong><button>Preview</button></div>{detail.specification.structure.pages.slice(0, 3).map((page, index) => <p className="task-row" key={page.id}><i>{index + 1}</i><span><b>{page.name}</b><small>{page.purpose}</small></span><em>{page.public ? 'Public' : 'Private'}</em></p>)}</section><aside className="copilot-card"><span>BROWSER AGENT</span><strong>{detail.specification.structure.agents[0]?.name ?? 'Secure by design'}</strong><p>{detail.specification.structure.agents[0]?.purpose ?? 'Data and privileged actions remain governed by server-enforced contracts.'}</p><button>{detail.specification.structure.agents.length ? 'Try in preview' : 'Review contracts'}</button></aside></div></div>
         </div>
 
         <div className="theme-options-grid">
@@ -133,9 +150,10 @@ export function VisualDesignStudio({ detail, onDetail, onNotice, onError }: Prop
 
       <aside className="theme-publish-panel">
         <div className="theme-summary"><Palette /><small>WORKING THEME</small><input value={draft.name} onChange={(event) => changed({ ...draft, name: event.target.value })}/><textarea value={draft.description} onChange={(event) => changed({ ...draft, description: event.target.value })}/></div>
-        <div className={`contrast-gate ${draft.accessibility.issues.length ? 'warning' : ''}`}>{draft.accessibility.issues.length ? <CircleAlert /> : <Check />}<div><strong>{draft.accessibility.issues.length ? 'Review required' : 'Accessibility gate'}</strong><span>{persistedRevision ? `${draft.accessibility.contrastScore}:1 minimum contrast` : 'Recalculated by the server on save'}</span></div></div>
-        <button className="publish-theme-button" onClick={() => void publish()} disabled={Boolean(busy)}>{busy === 'publish' ? <LoaderCircle className="spin" /> : <Check />} Validate & publish theme</button>
-        <p className="publish-help">Publishing compiles new CSS and promotes an immutable release. Data and application logic are unchanged.</p>
+        <div className={`contrast-gate ${previewAccessibility.issues.length ? 'warning' : ''}`}>{previewAccessibility.issues.length ? <CircleAlert /> : <Check />}<div><strong>{previewAccessibility.issues.length ? 'Contrast needs attention' : 'Accessibility gate passed'}</strong><span>{previewAccessibility.contrastScore}:1 minimum contrast</span></div></div>
+        {previewAccessibility.issues.length > 0 && <div className="contrast-issues">{previewAccessibility.issues.map((issue) => <p key={issue}>{issue}</p>)}<button type="button" onClick={autoFixContrast}>Auto-fix contrast</button></div>}
+        <button className="publish-theme-button" onClick={() => void publish()} disabled={Boolean(busy) || previewAccessibility.issues.length > 0}>{busy === 'publish' ? <LoaderCircle className="spin" /> : <Check />} Validate & add to preview</button>
+        <p className="publish-help">This compiles a new immutable preview. Production changes only when that exact preview is promoted.</p>
         <div className="theme-history"><div className="design-section-title"><span>Revision history</span><small>{detail.themes.length}</small></div>{detail.themes.slice(0, 6).map((theme) => <button key={theme.id} onClick={() => { setDraft(theme); setPersistedRevision(theme.revision); }}><span style={{ background: theme.tokens.colors.primary }} /><div><strong>{theme.name}</strong><small>v{theme.revision} · {theme.createdBy.replaceAll('-', ' ')}</small></div><em className={theme.status}>{theme.status}</em></button>)}</div>
       </aside>
     </div>

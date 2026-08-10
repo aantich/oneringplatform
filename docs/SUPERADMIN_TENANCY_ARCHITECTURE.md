@@ -386,7 +386,7 @@ iterate explicit tenant partitions; no wildcard tenant context is allowed.
 - Namespace app APIs under organizations and derive ownership server-side.
 - Add environment-qualified app identities, data namespaces, connector grants,
   releases, and route bindings.
-- Give organization builders the existing Browser Apps journey and release
+- Give organization builders the Applications discovery, definition, and release
   managers the promotion controls.
 
 ### Phase D: app multitenancy hardening

@@ -3,7 +3,12 @@ export type ModuleKind = 'page' | 'layout' | 'component' | 'provider' | 'hook' |
 export type CrudOperation = 'create' | 'read' | 'update' | 'delete';
 export type ThemeDensity = 'compact' | 'comfortable' | 'spacious';
 export type AppTenancyMode = 'personal' | 'team' | 'multi_organization';
+export type ApplicationType = 'browser_data' | 'full_stack' | 'api_service' | 'mobile' | 'workflow_automation';
+export type ApplicationIdentityMode = 'private' | 'public_and_authenticated' | 'organization_sso';
+export type ApplicationAgenticLevel = 'none' | 'assistive' | 'tool_using';
+export type ApplicationDataSensitivity = 'standard' | 'confidential' | 'regulated';
 export type GenerationEffort = 'low' | 'medium' | 'high';
+export type BrowserAppLifecycleStatus = 'draft' | 'specifying' | 'generating' | 'preview_ready' | 'generation_failed' | 'production';
 
 export interface BrowserGenerationAgentConfiguration {
   templateId: string;
@@ -93,15 +98,127 @@ export interface AppAcceptanceCriterion {
   kind: 'journey' | 'policy' | 'data' | 'agent' | 'accessibility';
 }
 
+export interface ApplicationProfile {
+  applicationType: ApplicationType;
+  tenancyMode: AppTenancyMode;
+  identityMode: ApplicationIdentityMode;
+  agenticLevel: ApplicationAgenticLevel;
+  dataSensitivity: ApplicationDataSensitivity;
+  execution: {
+    browser: boolean;
+    server: boolean;
+    backgroundJobs: boolean;
+    schedules: boolean;
+    webhooks: boolean;
+  };
+  deploymentTarget: 'managed_platform';
+}
+
+export interface AppSpecPersona {
+  id: string;
+  name: string;
+  description: string;
+  goals: string[];
+  painPoints: string[];
+  roleIds: string[];
+}
+
+export interface AppSpecUserStory {
+  id: string;
+  title: string;
+  personaId?: string;
+  statement: string;
+  priority: 'must' | 'should' | 'could';
+  surfaceIds: string[];
+  workflowIds: string[];
+  acceptanceCriterionIds: string[];
+}
+
+export interface AppSpecIntegration {
+  id: string;
+  name: string;
+  purpose: string;
+  connector?: string;
+  operations: string[];
+  failureBehavior: string;
+  dataClassification: ApplicationDataSensitivity;
+}
+
+export interface AppSpecDecision {
+  id: string;
+  title: string;
+  decision: string;
+  rationale: string;
+  status: 'proposed' | 'confirmed' | 'rejected';
+  sourceMessageIds: string[];
+}
+
+export interface AppSpecQualityAttribute {
+  id: string;
+  category: 'accessibility' | 'performance' | 'reliability' | 'security' | 'privacy' | 'operability';
+  requirement: string;
+  measure: string;
+}
+
 export interface AppStructuredSpecification {
   purpose: string;
   audience: AppTenancyMode;
+  personas: AppSpecPersona[];
+  userStories: AppSpecUserStory[];
   roles: AppSpecRole[];
   pages: AppSpecPage[];
   entities: AppSpecEntity[];
   workflows: AppSpecWorkflow[];
   agents: AppSpecAgent[];
+  integrations: AppSpecIntegration[];
+  decisions: AppSpecDecision[];
+  qualityAttributes: AppSpecQualityAttribute[];
+  designBrief: { tone: string; principles: string[]; accessibilityTarget: 'AA' | 'AAA' };
   acceptanceCriteria: AppAcceptanceCriterion[];
+}
+
+export interface ApplicationDiscoveryMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  createdAt: string;
+}
+
+export interface ApplicationDiscoveryEvent {
+  id: string;
+  sequence: number;
+  type: 'status' | 'thinking' | 'tool' | 'specification' | 'result' | 'warning' | 'error';
+  actor: string;
+  title: string;
+  detail?: string;
+  metadata?: Record<string, string | number | boolean>;
+  durationMs?: number;
+  createdAt: string;
+}
+
+export interface ApplicationDiscoveryDraft {
+  baseSpecRevision: number;
+  sections: BrowserAppSpecification['sections'];
+  structure: AppStructuredSpecification;
+  changes: Array<{ tool: string; targetId: string; summary: string }>;
+  updatedAt: string;
+}
+
+export interface ApplicationDiscoverySession {
+  id: string;
+  appId: string;
+  status: 'idle' | 'running' | 'failed';
+  progress: number;
+  phase: string;
+  baseSpecRevision: number;
+  currentSpecRevision: number;
+  messages: ApplicationDiscoveryMessage[];
+  events: ApplicationDiscoveryEvent[];
+  draft?: ApplicationDiscoveryDraft;
+  coverage: { score: number; covered: string[]; missing: string[]; contradictions: string[] };
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface TenancyRevision {
@@ -214,7 +331,9 @@ export interface BrowserApp {
   platformOrganizationId: string;
   name: string;
   description: string;
-  runtimeProfile: 'browser_data';
+  runtimeProfile: 'browser_data' | 'specification_only';
+  profile: ApplicationProfile;
+  generatorId?: string;
   projectId: string;
   specRevision: number;
   generatedFromSpecRevision: number;
@@ -228,10 +347,62 @@ export interface BrowserApp {
   agentAccent?: string;
   agentHeadline?: string;
   generationProfile?: BrowserGenerationProfile;
+  lifecycleStatus: BrowserAppLifecycleStatus;
+  specificationApprovalStatus: 'draft' | 'approved';
   activeReleaseId?: string;
   previewReleaseId?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export type GenerationJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type GenerationWorkerStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type GenerationEventType = 'status' | 'thinking' | 'tool' | 'model' | 'result' | 'warning' | 'error';
+
+export interface BrowserGenerationEvent {
+  id: string;
+  sequence: number;
+  type: GenerationEventType;
+  actor: string;
+  title: string;
+  detail?: string;
+  createdAt: string;
+  durationMs?: number;
+  metadata?: Record<string, string | number | boolean>;
+}
+
+export interface BrowserGenerationWorker {
+  templateId: string;
+  name: string;
+  role: string;
+  connector: string;
+  model: string;
+  effort: GenerationEffort;
+  status: GenerationWorkerStatus;
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
+  error?: string;
+  metrics?: { inputTokens: number; outputTokens: number; reasoningTokens: number; toolCalls: number };
+}
+
+export interface BrowserGenerationJob {
+  id: string;
+  appId: string;
+  specRevision: number;
+  instruction: string;
+  generationProfile: BrowserGenerationProfile;
+  status: GenerationJobStatus;
+  phase: string;
+  progress: number;
+  workers: BrowserGenerationWorker[];
+  events: BrowserGenerationEvent[];
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  error?: string;
+  result?: { sourceRevision: number; previewReleaseId: string; previewVersion: string; buildId: string };
 }
 
 export interface BrowserAppSpecification {
@@ -348,6 +519,8 @@ export interface AppGraphChangeSet {
   schemaDeletes: string[];
   policyUpserts: Array<Omit<EntityPolicyRecord, 'appId' | 'revision'>>;
   policyDeletes: string[];
+  connectorUpserts: Array<Omit<ConnectorActionRecord, 'appId' | 'revision'>>;
+  connectorDeletes: string[];
   agentUpserts: Array<Pick<BrowserAgentRecord, 'id' | 'name' | 'description' | 'connector' | 'model' | 'instructions' | 'allowedRoles' | 'toolIds' | 'maximumIterations' | 'humanApprovalRequired' | 'requirementIds'>>;
   agentDeletes: string[];
 }

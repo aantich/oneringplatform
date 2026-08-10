@@ -10,6 +10,7 @@ Mongo data, model, connector, audit, build, and release gateways.
 The approved `BrowserAppSpecification` is the source of truth. Each immutable
 revision contains stable requirements plus a typed structure:
 
+- personas, pain points, prioritized user stories, and recorded decisions;
 - roles and audience mode;
 - pages with independent paths, roles, states, entities, workflows, agents, and
   acceptance-criterion references;
@@ -18,6 +19,8 @@ revision contains stable requirements plus a typed structure:
   approval steps;
 - browser-agent contracts with model connector, model, tool grants, iteration
   budget, and approval behavior;
+- integration failure contracts, measurable quality attributes, and a shared
+  design brief;
 - measurable acceptance criteria traced to stable requirement IDs.
 
 Generated modules, routes, schemas, policies, and agents all carry requirement
@@ -60,6 +63,27 @@ disabled/duplicate templates, unknown connectors, cross-vendor models, invalid
 effort values, and teams larger than three. Hidden platform instructions and
 provider credentials are never returned to the tenant UI.
 
+## Versioned runtime capability contract
+
+`browser-runtime-capabilities.ts` is the single machine-readable catalog for
+the backend surface available to generated code. The same catalog is injected
+into generation-agent instructions and returned by `/_or/bootstrap`, together
+with the effective entities, operations, readable/writable fields, connector
+actions, and browser agents for the current role and pinned release.
+
+Generated code imports the `bootstrap`, `data`, `invokeConnector`, and
+`runAgent` helpers from `app:runtime`. Direct `fetch`, `XMLHttpRequest`, sockets,
+cookies, and model-vendor calls fail source admission. The helpers add release
+preview capabilities, CSRF protection, idempotency keys, optimistic concurrency
+headers, and the app-scoped route base. The server remains authoritative for
+identity, tenant scope, schemas, policies, rate limits, connector credentials,
+auditing, and physical Mongo namespaces.
+
+The contract is deliberately versioned. New generation jobs always receive the
+latest catalog automatically. Existing releases remain pinned to the runtime
+version they passed until a new build or migration passes admission; backend
+evolution therefore cannot silently break production apps.
+
 ## Browser-agent execution
 
 The generated runtime exports `runAgent`. The browser owns the loop state,
@@ -88,7 +112,12 @@ Every candidate build runs server-authoritative checks for graph integrity,
 structured-spec completeness, requirement traceability, acceptance contracts,
 schema/policy/agent contracts, imports, source security, tenancy, theme
 accessibility, real esbuild compilation, and artifact hashing. The resulting
-JavaScript lives in GridFS locally and has an immutable SHA-256 digest.
+JavaScript lives in Mongo GridFS locally and has an immutable SHA-256 digest.
+Application definitions, source modules, schemas, policies, build records,
+release pointers, and compiled CSS live in Mongo collections. The runtime
+controller serves the HTML shell and streams the pinned JS/CSS artifacts from
+that database-backed release; there is no generated application filesystem or
+standalone app server.
 
 A preview release pins the exact spec, source, schema, policy, connector, theme,
 tenancy, runtime, generator, generation-team template versions/model settings,
@@ -101,11 +130,13 @@ and removes the preview capability token.
 
 ## Studio workflow
 
-1. Create an app in the active platform organization and choose personal, team,
-   or multi-organization audience mode.
-2. Edit the living requirements and the separate Pages, Workflows, Data model,
-   Browser agents, Users & tenancy, and Visual design contracts.
-3. Save the specification. The UI shows that source regeneration is required.
+1. Create an application in the active platform organization and select the
+   `browser_data` profile, tenancy, identity, agentic level, and sensitivity.
+2. Use tool-driven Discover to develop the structured definition, then review
+   its synchronized PRD, Blueprint, Pages, Workflows, Data, Browser agents,
+   Users & tenancy, and Visual design views.
+3. Save and explicitly approve the current specification revision. The UI
+   shows that source regeneration is required after every semantic edit.
 4. Select one to three generation specialists and choose a connector, model,
    and reasoning effort for each; then generate a preview.
 5. Review repair-attempt results and release evidence.

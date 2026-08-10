@@ -18,7 +18,10 @@ fi
 MONGO_URI="$MONGO_E2E_URI"
 AI_DISABLED=1
 LOCAL_DEV_AUTH=1
-export MONGO_URI AI_DISABLED LOCAL_DEV_AUTH
+PORT="${PORT:-4102}"
+WEB_PORT="${WEB_PORT:-5174}"
+API_ORIGIN="${API_ORIGIN:-http://127.0.0.1:${PORT}}"
+export MONGO_URI AI_DISABLED LOCAL_DEV_AUTH PORT WEB_PORT API_ORIGIN
 node scripts/reset-e2e-db.mjs
 trap 'node scripts/reset-e2e-db.mjs' EXIT
 npx playwright test

@@ -14,6 +14,7 @@ import { jwtVerify, SignJWT } from 'jose';
 import type { AppRole, BrowserApp, BrowserRelease, CrudOperation, PolicyGrant, RuntimePrincipal, TenancyRevision } from './browser-app.domain.js';
 import { BrowserAppRepository } from './browser-app.repository.js';
 import { AiService } from './ai.service.js';
+import { browserRuntimeContractVersion, browserRuntimeOperations } from './browser-runtime-capabilities.js';
 
 const roles: AppRole[] = ['public', 'viewer', 'editor', 'admin'];
 type RuntimeContract = { release: BrowserRelease; tenancy: TenancyRevision };
@@ -300,8 +301,11 @@ export class BrowserAppRuntimeService {
   }
 
   private async session(app: BrowserApp, principal: RuntimePrincipal, basePath: string, contract: RuntimeContract) {
-    const [policies, detail, memberships] = await Promise.all([
+    const [policies, schemas, connectors, agents, detail, memberships] = await Promise.all([
       this.repository.policies(app.id, contract.release.policyRevision),
+      this.repository.schemas(app.id, contract.release.schemaRevision),
+      this.repository.connectors(app.id, contract.release.connectorRevision),
+      this.repository.agents(app.id, contract.release.connectorRevision),
       this.repository.detail(app.id),
       principal.role === 'public' ? Promise.resolve([]) : this.repository.membershipsForSubject(app.id, principal.subject),
     ]);
@@ -316,6 +320,26 @@ export class BrowserAppRuntimeService {
       app: { id: app.id, name: app.name, description: app.description, runtimeProfile: app.runtimeProfile },
       principal: { subject: principal.subject, role: principal.role, tenantId: principal.tenantId },
       capabilities: [...new Set(policies.flatMap((policy) => policy.grants[principal.role].uiCapabilities))],
+      runtime: {
+        contractVersion: browserRuntimeContractVersion,
+        operations: browserRuntimeOperations,
+        entities: schemas.map((schema) => {
+          const grant = policies.find((policy) => policy.entity === schema.entity)?.grants[principal.role];
+          return {
+            id: schema.entity,
+            displayName: schema.displayName,
+            operations: grant?.operations ?? [],
+            readFields: grant?.readFields ?? [],
+            writeFields: grant?.writeFields ?? [],
+          };
+        }),
+        connectorActions: connectors
+          .filter((connector) => connector.allowedRoles.includes(principal.role))
+          .map((connector) => ({ id: connector.id, connector: connector.connector, action: connector.action, description: connector.description })),
+        agents: agents
+          .filter((agent) => agent.allowedRoles.includes(principal.role))
+          .map((agent) => ({ id: agent.id, name: agent.name, description: agent.description, toolIds: agent.toolIds, maximumIterations: agent.maximumIterations, humanApprovalRequired: agent.humanApprovalRequired })),
+      },
       tenancy: {
         mode: contract.tenancy.mode,
         organizationLabel: contract.tenancy.organizationLabel,
@@ -323,6 +347,7 @@ export class BrowserAppRuntimeService {
         organizations: available,
       },
       csrfToken: principal.csrf, basePath,
+      demoAuthentication: process.env.NODE_ENV !== 'production',
       releaseId: contract.release.id,
       environment: contract.release.environment,
       sourceRevision: contract.release.sourceRevision,
