@@ -17,7 +17,7 @@ generator-module boundary are documented in
 - Visual living application blueprint backed by stable structured-spec IDs.
 - Generic application profiles covering product type, tenancy, identity,
   agent authority, data sensitivity, execution placement, and deployment target.
-- Tool-driven AI discovery using the local `@everworker/oneringai`
+- Tool-driven AI discovery using the pinned `@everworker/oneringai`
   connector-first API; agents perform validated, focused JSON operations.
 - One versioned application definition projected as the interview, PRD,
   blueprint, pages, data, workflows, runtime agents, decisions, quality
@@ -54,6 +54,11 @@ Production KMS wrapping for the existing connector encryption, CDN and DNS/TLS
 providers still need deployment adapters. Full-stack hosted workspaces remain simulated.
 
 ## Run
+
+Node.js 22 or newer is required. OneRingAI is a server-only dependency, so it
+is declared in `apps/api/package.json` rather than the root manifest. The root
+npm workspace installs/hoists it and `package-lock.json` pins the complete
+dependency graph.
 
 This project uses the MongoDB instance exposed by the sibling icos Docker stack
 on `127.0.0.1:27017`; it does not start or own a competing database container.

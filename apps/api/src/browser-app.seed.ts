@@ -188,7 +188,7 @@ export const seedBrowserAppSpecification: BrowserAppSpecification = {
       { id: 'mutate', type: 'data_write', description: 'Apply an authorized task mutation.' },
       { id: 'suggest', type: 'agent', description: 'Ask the browser-owned planning agent for a next task.' },
     ] }],
-    agents: [{ id: 'task-planner', name: 'Task planner', purpose: 'Suggest one useful next task.', connector: 'openai-main', model: 'gpt-5.4-mini', toolIds: ['idea-assistant:suggest'], maximumIterations: 4, humanApprovalRequired: false }],
+    agents: [{ id: 'task-planner', name: 'Task planner', purpose: 'Suggest one useful next task.', connector: 'openai-main', model: 'gpt-5.6-terra', toolIds: ['idea-assistant:suggest'], maximumIterations: 4, humanApprovalRequired: false }],
     integrations: [{ id: 'idea-assistant', name: 'Idea assistant', purpose: 'Provide bounded task suggestions.', connector: 'openai-main', operations: ['suggest'], failureBehavior: 'Keep manual task creation available.', dataClassification: 'standard' }],
     decisions: [{ id: 'browser-owned-agent-loop', title: 'Browser-owned agent loop', decision: 'Agent iteration and approvals run in the browser through managed gateways.', rationale: 'Keep application behavior lightweight while credentials and authorization remain server-side.', status: 'confirmed', sourceMessageIds: [] }],
     qualityAttributes: [
@@ -251,7 +251,7 @@ export const seedConnectors: ConnectorActionRecord[] = [{
 export const seedAgents: BrowserAgentRecord[] = [{
   id: 'task-planner', appId, revision: 1, name: 'Task planner',
   description: 'A browser-orchestrated agent that proposes one useful next task.',
-  connector: 'openai-main', model: 'gpt-5.4-mini',
+  connector: 'openai-main', model: 'gpt-5.6-terra',
   instructions: 'Help the user decide one practical next task. You may request the idea-assistant:suggest tool when useful. Return concise, actionable guidance.',
   allowedRoles: ['viewer', 'editor', 'admin'], toolIds: ['idea-assistant:suggest'], maximumIterations: 4,
   humanApprovalRequired: false, requirementIds: ['goal', 'security'],

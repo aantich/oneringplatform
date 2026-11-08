@@ -102,7 +102,7 @@ const agents: BuilderAgent[] = agentDefinitions.map(([id, name, role, stage], in
   role,
   stage,
   connector: index % 3 === 0 ? 'anthropic-main' : 'openai-main',
-  model: index % 3 === 0 ? 'claude-sonnet-4-6' : 'gpt-5.4-mini',
+  model: index % 3 === 0 ? 'claude-sonnet-5' : 'gpt-5.6-terra',
   effort: index === 7 || index === 8 ? 'high' : 'medium',
   instructions: `You are the ${role.toLowerCase()} for the One Ring managed application pipeline. Be explicit about assumptions, exceptions, evidence, and traceability.`,
   tools: index < 2 ? ['spec_read', 'spec_write', 'ask_user'] : ['spec_read', 'spec_write', 'workspace_read'],

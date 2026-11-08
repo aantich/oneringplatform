@@ -33,7 +33,7 @@ export function ApplicationDiscovery({
   const connectorDefault = options?.connectors.find((candidate) => candidate.configured) ?? options?.connectors[0];
   const [connector, setConnector] = useState(connectorDefault?.id ?? 'openai-main');
   const selectedConnector = options?.connectors.find((candidate) => candidate.id === connector) ?? connectorDefault;
-  const [model, setModel] = useState(selectedConnector?.models.find((candidate) => candidate.preferred)?.id ?? selectedConnector?.models[0]?.id ?? 'gpt-5.4-mini');
+  const [model, setModel] = useState(selectedConnector?.models.find((candidate) => candidate.preferred)?.id ?? selectedConnector?.models[0]?.id ?? 'gpt-5.6-terra');
   const [effort, setEffort] = useState<GenerationEffort>('high');
 
   const refresh = async () => {

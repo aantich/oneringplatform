@@ -14,8 +14,8 @@ liveDescribe('live AI connector smoke tests', () => {
     expect(process.env.OPENAI_API_KEY, 'OPENAI_API_KEY must be configured').toBeTruthy();
     const output = await ai.suggestTask(
       prompt,
-      'openai-live-smoke',
-      process.env.ONERING_OPENAI_MODEL ?? process.env.ONERING_DEFAULT_MODEL ?? 'gpt-5.4-mini',
+      'openai-main',
+      process.env.ONERING_OPENAI_MODEL ?? process.env.ONERING_DEFAULT_MODEL ?? 'gpt-5.6-terra',
     );
     expect(output.length).toBeGreaterThan(10);
     expect(output.length).toBeLessThanOrEqual(300);
@@ -25,8 +25,8 @@ liveDescribe('live AI connector smoke tests', () => {
     expect(process.env.ANTHROPIC_API_KEY, 'ANTHROPIC_API_KEY must be configured').toBeTruthy();
     const output = await ai.suggestTask(
       prompt,
-      'anthropic-live-smoke',
-      process.env.ONERING_ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
+      'anthropic-main',
+      process.env.ONERING_ANTHROPIC_MODEL ?? 'claude-sonnet-5',
     );
     expect(output.length).toBeGreaterThan(10);
     expect(output.length).toBeLessThanOrEqual(300);

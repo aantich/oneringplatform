@@ -175,9 +175,9 @@ export class PlatformService {
 
   connectors(): ConnectorSummary[] {
     return [
-      { id: 'openai-main', name: 'OpenAI', vendor: 'OpenAI', kind: 'llm', configured: Boolean(process.env.OPENAI_API_KEY), model: 'gpt-5.4-mini' },
-      { id: 'anthropic-main', name: 'Anthropic', vendor: 'Anthropic', kind: 'llm', configured: Boolean(process.env.ANTHROPIC_API_KEY), model: 'claude-sonnet-4-6' },
-      { id: 'google-main', name: 'Google AI', vendor: 'Google', kind: 'llm', configured: Boolean(process.env.GOOGLE_API_KEY), model: 'gemini-3-flash' },
+      { id: 'openai-main', name: 'OpenAI', vendor: 'OpenAI', kind: 'llm', configured: Boolean(process.env.OPENAI_API_KEY), model: 'gpt-5.6-terra' },
+      { id: 'anthropic-main', name: 'Anthropic', vendor: 'Anthropic', kind: 'llm', configured: Boolean(process.env.ANTHROPIC_API_KEY), model: 'claude-sonnet-5' },
+      { id: 'google-main', name: 'Google AI', vendor: 'Google', kind: 'llm', configured: Boolean(process.env.GOOGLE_API_KEY), model: 'gemini-3.6-flash' },
       { id: 'serper', name: 'Serper Search', vendor: 'Serper', kind: 'search', configured: Boolean(process.env.SERPER_KEY) },
       { id: 'zenrows', name: 'ZenRows', vendor: 'ZenRows', kind: 'scrape', configured: Boolean(process.env.ZENROWS_API_KEY) },
     ];

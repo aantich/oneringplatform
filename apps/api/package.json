@@ -13,7 +13,7 @@
     "test:ai:live": "RUN_LIVE_AI_TESTS=1 vitest run src/ai.live.test.ts"
   },
   "dependencies": {
-    "@everworker/oneringai": "0.11.0",
+    "@everworker/oneringai": "1.0.1",
     "@nestjs/common": "^11.1.6",
     "@nestjs/core": "^11.1.6",
     "@nestjs/platform-express": "^11.1.6",

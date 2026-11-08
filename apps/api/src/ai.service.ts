@@ -43,6 +43,9 @@ compact|comfortable|spacious; contentWidth: narrow|standard|wide. componentVaria
 solid|glass|minimal, cards: outlined|soft|elevated, buttons: solid|gradient|outline. customCss must be an empty string.
 Ensure normal text contrast is at least 4.5:1 on both background and surface, and primaryContrast is at least 4.5:1 on primary.`;
 
+const DEFAULT_OPENAI_MODEL = 'gpt-5.6-terra';
+const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-5';
+
 const stableId = z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/);
 const fieldName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_-]{0,63}$/);
 const requirementIds = z.array(stableId).max(40);
@@ -98,6 +101,71 @@ const graphPlanSchema = z.object({
   agentDeletes: z.array(stableId).max(12).default([]),
 });
 
+const browserAgentTurnSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('final'), output: z.string().trim().min(1).max(8_000) }).strict(),
+  z.object({
+    type: z.literal('tool'),
+    toolId: z.string().regex(/^[a-z0-9-]+:[a-z0-9-]+$/),
+    input: z.record(z.string(), z.unknown()),
+  }).strict(),
+  z.object({ type: z.literal('approval'), message: z.string().trim().min(1).max(2_000) }).strict(),
+]);
+
+const visualThemePlanSchema = z.object({
+  name: z.string().trim().min(2).max(80),
+  description: z.string().trim().min(3).max(280),
+  tokens: z.object({
+    colors: z.object({
+      background: z.string().regex(/^#[0-9a-f]{6}$/i),
+      surface: z.string().regex(/^#[0-9a-f]{6}$/i),
+      surfaceElevated: z.string().regex(/^#[0-9a-f]{6}$/i),
+      text: z.string().regex(/^#[0-9a-f]{6}$/i),
+      textMuted: z.string().regex(/^#[0-9a-f]{6}$/i),
+      primary: z.string().regex(/^#[0-9a-f]{6}$/i),
+      primaryContrast: z.string().regex(/^#[0-9a-f]{6}$/i),
+      accent: z.string().regex(/^#[0-9a-f]{6}$/i),
+      success: z.string().regex(/^#[0-9a-f]{6}$/i),
+      danger: z.string().regex(/^#[0-9a-f]{6}$/i),
+      border: z.string().regex(/^#[0-9a-f]{6}$/i),
+    }).strict(),
+    typography: z.object({
+      fontFamily: z.enum(['inter', 'manrope', 'system', 'serif']),
+      headingStyle: z.enum(['compact', 'editorial', 'balanced']),
+      baseSize: z.union([z.literal(14), z.literal(15), z.literal(16), z.literal(17), z.literal(18)]),
+    }).strict(),
+    shape: z.object({
+      radius: z.enum(['sharp', 'soft', 'rounded']),
+      borderWidth: z.union([z.literal(0), z.literal(1), z.literal(2)]),
+    }).strict(),
+    density: z.enum(['compact', 'comfortable', 'spacious']),
+    contentWidth: z.enum(['narrow', 'standard', 'wide']),
+  }).strict(),
+  componentVariants: z.object({
+    navigation: z.enum(['solid', 'glass', 'minimal']),
+    cards: z.enum(['outlined', 'soft', 'elevated']),
+    buttons: z.enum(['solid', 'gradient', 'outline']),
+  }).strict(),
+  customCss: z.literal(''),
+}).strict();
+
+const graphPlanResponseFormat = {
+  type: 'json_schema' as const,
+  name: 'browser_app_plan',
+  schema: z.toJSONSchema(graphPlanSchema, { target: 'draft-7' }),
+  strict: true,
+};
+
+const browserAgentTurnResponseFormat = {
+  type: 'json_object' as const,
+};
+
+const visualThemePlanResponseFormat = {
+  type: 'json_schema' as const,
+  name: 'visual_theme_plan',
+  schema: z.toJSONSchema(visualThemePlanSchema, { target: 'draft-7' }),
+  strict: true,
+};
+
 @Injectable()
 export class AiService {
   private readonly logger = new Logger(AiService.name);
@@ -121,15 +189,22 @@ export class AiService {
       vendor: definition.vendor,
       configured: Boolean(definition.apiKey),
       models: getModelsByVendor(definition.vendor)
-        .filter((model) => model.isActive && !/(audio|realtime|transcrib|speech|tts|image|video|embedding|deep-research)/i.test(model.name))
-        .sort((left, right) => Number(right.preferred) - Number(left.preferred)
+        .filter((model) => model.isActive
+          && (model.lifecycle === 'active' || model.lifecycle === 'preview')
+          && model.availability === 'public'
+          && model.features.input.text
+          && model.features.output.text
+          && !model.features.realtime
+          && !model.features.audio)
+        .sort((left, right) => Number(right.name === definition.defaultModel) - Number(left.name === definition.defaultModel)
+          || Number(right.preferred) - Number(left.preferred)
           || String(right.releaseDate ?? '').localeCompare(String(left.releaseDate ?? '')))
         .slice(0, 18)
         .map((model) => ({
           id: model.name,
           name: model.name,
           description: model.description ?? `${definition.name} language model`,
-          preferred: Boolean(model.preferred),
+          preferred: model.name === definition.defaultModel,
         })),
     }));
   }
@@ -137,13 +212,14 @@ export class AiService {
   async interview(message: string, context: string): Promise<string> {
     if (!this.available()) return this.fallback(message);
 
+    let agent: Agent | undefined;
     try {
       const connector = this.ensureConnector();
-      const agent = Agent.create({
+      agent = Agent.create({
         connector,
-        model: process.env.ONERING_DEFAULT_MODEL ?? 'gpt-5.4-mini',
+        model: this.resolveModel(connector),
         instructions: INTERVIEW_INSTRUCTIONS,
-        temperature: 0.25,
+        thinking: { enabled: true, effort: 'medium' },
         maxIterations: 4,
       });
       const response = await agent.run(
@@ -153,6 +229,8 @@ export class AiService {
     } catch (error) {
       this.logger.warn(`LLM interview failed; returning safe fallback: ${String(error)}`);
       return this.fallback(message);
+    } finally {
+      agent?.destroy();
     }
   }
 
@@ -169,9 +247,10 @@ export class AiService {
     const pendingEvents: Promise<void>[] = [];
     const flush = async () => { await Promise.allSettled(pendingEvents.splice(0)); };
     try {
+      const connector = this.ensureConnector(configuration.connector);
       agent = Agent.create({
-        connector: this.ensureConnector(configuration.connector),
-        model: configuration.model ?? process.env.ONERING_DEFAULT_MODEL ?? 'gpt-5.4-mini',
+        connector,
+        model: this.resolveModel(connector, configuration.model),
         instructions: SPECIFICATION_DISCOVERY_INSTRUCTIONS,
         thinking: { enabled: true, effort: configuration.effort ?? 'high' },
         tools,
@@ -218,9 +297,10 @@ export class AiService {
     const pendingEvents: Promise<void>[] = [];
     const flushEvents = async () => { await Promise.allSettled(pendingEvents.splice(0)); };
     try {
+      const connector = this.ensureConnector(configuration?.connector);
       agent = Agent.create({
-        connector: this.ensureConnector(configuration?.connector),
-        model: configuration?.model ?? process.env.ONERING_DEFAULT_MODEL ?? 'gpt-5.4-mini',
+        connector,
+        model: this.resolveModel(connector, configuration?.model),
         instructions: `${configuration?.instructions ?? ''}\n\n${BROWSER_APP_INSTRUCTIONS}`.trim(),
         thinking: { enabled: true, effort: configuration?.effort ?? 'medium' },
         maxIterations: 1,
@@ -239,12 +319,11 @@ export class AiService {
       agent.on('tool:complete', (data: any) => emit({ type: 'tool', title: `Completed ${data?.toolCall?.function?.name ?? 'agent tool'}`, durationMs: Number(data?.result?.executionTime ?? 0) }));
       abortListener = () => agent?.cancel('Generation cancelled by the user');
       signal?.addEventListener('abort', abortListener, { once: true });
-      const response = await agent.run(`Approved PRD:\n${context}`);
+      const response = await agent.run(`Approved PRD:\n${context}`, { responseFormat: graphPlanResponseFormat });
       signal?.removeEventListener('abort', abortListener);
       await flushEvents();
       if (signal?.aborted) throw new Error('Generation cancelled by the user');
-      const raw = response.output_text?.trim().replace(/^```(?:json)?\s*|\s*```$/g, '') ?? '';
-      const parsed = graphPlanSchema.parse(JSON.parse(raw));
+      const parsed = graphPlanSchema.parse(response.output_parsed);
       const { accent, headline, ...changeSet } = parsed;
       const metrics = agent.getSummary()?.metrics;
       await onEvent?.({
@@ -268,12 +347,14 @@ export class AiService {
 
   async suggestTask(context: string, connectorName?: string, modelName?: string): Promise<string> {
     if (!this.available()) return `Review the highest-impact workflow and turn “${context.slice(0, 60)}” into one measurable acceptance test.`;
+    let agent: Agent | undefined;
     try {
-      const agent = Agent.create({
-        connector: this.ensureConnector(connectorName),
-        model: modelName ?? process.env.ONERING_DEFAULT_MODEL ?? 'gpt-5.4-mini',
+      const connector = this.ensureConnector(connectorName);
+      agent = Agent.create({
+        connector,
+        model: this.resolveModel(connector, modelName),
         instructions: 'Suggest exactly one concise, actionable product-team task. Return only the task sentence. Do not use markdown.',
-        temperature: 0.35,
+        thinking: { enabled: true, effort: 'low' },
         maxIterations: 2,
       });
       const response = await agent.run(context);
@@ -281,6 +362,8 @@ export class AiService {
     } catch (error) {
       this.logger.warn(`Task suggestion failed; returning fallback: ${String(error)}`);
       return 'Write one acceptance test for the riskiest user journey.';
+    } finally {
+      agent?.destroy();
     }
   }
 
@@ -289,24 +372,29 @@ export class AiService {
     input: { goal: string; iteration: number; history: Array<{ role: 'assistant' | 'tool'; content: string }> },
   ): Promise<{ type: 'final'; output: string } | { type: 'tool'; toolId: string; input: Record<string, unknown> } | { type: 'approval'; message: string }> {
     if (!this.available()) return { type: 'final', output: `A practical next step is to turn “${input.goal.slice(0, 100)}” into one small, measurable task.` };
+    let agent: Agent | undefined;
     try {
-      const agent = Agent.create({
+      agent = Agent.create({
         connector: this.ensureConnector(definition.connector), model: definition.model,
         instructions: `${definition.instructions}\n\nYou are producing exactly one turn for a browser-owned agent loop. Return only strict JSON. Return {"type":"final","output":"..."}, {"type":"tool","toolId":"connector:action","input":{...}}, or {"type":"approval","message":"..."}. You may request only these tools: ${definition.toolIds.join(', ') || 'none'}. Do not repeat a tool request already answered in history.`,
-        temperature: 0.2, maxIterations: 1,
+        thinking: { enabled: true, effort: 'low' }, maxIterations: 1,
       });
-      const response = await agent.run(`Goal: ${input.goal}\nIteration: ${input.iteration}\nHistory: ${JSON.stringify(input.history)}`);
-      const raw = response.output_text?.trim().replace(/^```(?:json)?\s*|\s*```$/g, '') ?? '';
-      const value = JSON.parse(raw) as Record<string, unknown>;
-      if (value.type === 'final' && typeof value.output === 'string' && value.output.trim()) return { type: 'final', output: value.output.trim().slice(0, 8_000) };
-      if (value.type === 'approval' && typeof value.message === 'string' && definition.humanApprovalRequired) return { type: 'approval', message: value.message.trim().slice(0, 2_000) };
-      if (value.type === 'tool' && typeof value.toolId === 'string' && definition.toolIds.includes(value.toolId) && value.input && typeof value.input === 'object' && !Array.isArray(value.input)) {
-        return { type: 'tool', toolId: value.toolId, input: value.input as Record<string, unknown> };
+      const response = await agent.run(
+        `Goal: ${input.goal}\nIteration: ${input.iteration}\nHistory: ${JSON.stringify(input.history)}`,
+        { responseFormat: browserAgentTurnResponseFormat },
+      );
+      const value = browserAgentTurnSchema.parse(response.output_parsed);
+      if (value.type === 'final') return value;
+      if (value.type === 'approval' && definition.humanApprovalRequired) return value;
+      if (value.type === 'tool' && definition.toolIds.includes(value.toolId)) {
+        return value;
       }
       throw new Error('Agent turn did not match its browser-loop contract');
     } catch (error) {
       this.logger.warn(`Browser agent turn failed; returning safe final response: ${String(error)}`);
       return { type: 'final', output: 'Create one measurable next task, assign an owner, and define the evidence that will prove it is complete.' };
+    } finally {
+      agent?.destroy();
     }
   }
 
@@ -317,30 +405,47 @@ export class AiService {
     configuration?: { connector?: string; model?: string; instructions?: string },
   ): Promise<Record<string, unknown> | undefined> {
     if (!this.available()) return undefined;
+    let agent: Agent | undefined;
     try {
-      const agent = Agent.create({
-        connector: this.ensureConnector(configuration?.connector),
-        model: configuration?.model || process.env.ONERING_DEFAULT_MODEL || 'gpt-5.4-mini',
+      const connector = this.ensureConnector(configuration?.connector);
+      agent = Agent.create({
+        connector,
+        model: this.resolveModel(connector, configuration?.model),
         instructions: `${configuration?.instructions ?? ''}\n\n${VISUAL_DESIGN_INSTRUCTIONS}`.trim(),
-        temperature: 0.25,
+        thinking: { enabled: true, effort: 'medium' },
         maxIterations: 3,
       });
       const response = await agent.run(
         `Product and page context:\n${context}\n\nCurrent theme:\n${JSON.stringify(currentTheme)}\n\nUser direction:\n${direction}`,
+        { responseFormat: visualThemePlanResponseFormat },
       );
-      const raw = response.output_text?.trim().replace(/^```(?:json)?\s*|\s*```$/g, '') ?? '';
-      return JSON.parse(raw) as Record<string, unknown>;
+      return visualThemePlanSchema.parse(response.output_parsed);
     } catch (error) {
       this.logger.warn(`Visual design agent failed; caller will use a safe starter: ${String(error)}`);
       return undefined;
+    } finally {
+      agent?.destroy();
     }
   }
 
-  private connectorDefinitions(): Array<{ id: string; name: string; vendor: Vendor; apiKey?: string }> {
+  private connectorDefinitions(): Array<{ id: string; name: string; vendor: Vendor; defaultModel: string; apiKey?: string }> {
     return [
-      { id: 'openai-main', name: 'OpenAI', vendor: Vendor.OpenAI, apiKey: process.env.OPENAI_API_KEY },
-      { id: 'anthropic-main', name: 'Anthropic', vendor: Vendor.Anthropic, apiKey: process.env.ANTHROPIC_API_KEY },
+      { id: 'openai-main', name: 'OpenAI', vendor: Vendor.OpenAI, defaultModel: DEFAULT_OPENAI_MODEL, apiKey: process.env.OPENAI_API_KEY },
+      { id: 'anthropic-main', name: 'Anthropic', vendor: Vendor.Anthropic, defaultModel: DEFAULT_ANTHROPIC_MODEL, apiKey: process.env.ANTHROPIC_API_KEY },
     ];
+  }
+
+  private resolveModel(connectorName: string, requested?: string): string {
+    if (requested?.trim()) return requested.trim();
+    const definition = this.connectorDefinitions().find((candidate) => candidate.id === connectorName);
+    if (!definition) throw new Error(`Unknown OneRingAI connector ${connectorName}`);
+    const vendorOverride = definition.vendor === Vendor.OpenAI
+      ? process.env.ONERING_OPENAI_MODEL
+      : process.env.ONERING_ANTHROPIC_MODEL;
+    const configured = this.connectorDefinitions().filter((candidate) => candidate.apiKey);
+    const defaultConnector = process.env.ONERING_DEFAULT_CONNECTOR ?? configured[0]?.id ?? 'openai-main';
+    const legacyOverride = connectorName === defaultConnector ? process.env.ONERING_DEFAULT_MODEL : undefined;
+    return vendorOverride ?? legacyOverride ?? definition.defaultModel;
   }
 
   private ensureConnector(requested?: string): string {
